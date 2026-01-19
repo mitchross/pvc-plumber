@@ -1,0 +1,18 @@
+# Ignore everything by default
+**
+
+# Allow specific files and directories
+!.github/
+!.github/**
+!cmd/
+!cmd/**
+!internal/
+!internal/**
+!go.mod
+!go.sum
+!Dockerfile
+!Dockerfile.debug
+!Makefile
+!README.md
+!.dockerignore
+!.gitignore

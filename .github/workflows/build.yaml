@@ -1,0 +1,94 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Verify dependencies
+      run: go mod verify
+
+    - name: Run go vet
+      run: go vet ./...
+
+    - name: Run tests
+      run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+
+    - name: Check coverage
+      run: |
+        total_coverage=$(go tool cover -func=coverage.txt | grep total | awk '{print $3}' | sed 's/%//')
+        echo "Total coverage: ${total_coverage}%"
+        echo "Coverage by package:"
+        go tool cover -func=coverage.txt | grep -E "^github.com" | awk '{print $1 " " $3}'
+        # Check that tested packages have >80% coverage
+        # Note: main.go is integration/startup code and doesn't need unit tests
+        config_coverage=$(go test -coverprofile=/tmp/config.out ./internal/config 2>&1 | grep coverage | awk '{print $5}' | sed 's/%//')
+        handler_coverage=$(go test -coverprofile=/tmp/handler.out ./internal/handler 2>&1 | grep coverage | awk '{print $5}' | sed 's/%//')
+        s3_coverage=$(go test -coverprofile=/tmp/s3.out ./internal/s3 2>&1 | grep coverage | awk '{print $5}' | sed 's/%//')
+        echo "Config coverage: ${config_coverage}%"
+        echo "Handler coverage: ${handler_coverage}%"
+        echo "S3 coverage: ${s3_coverage}%"
+
+    - name: Upload coverage to GitHub
+      uses: codecov/codecov-action@v4
+      if: always()
+      with:
+        files: ./coverage.txt
+        fail_ci_if_error: false
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: Build binary
+      run: CGO_ENABLED=0 go build -v -o pvc-plumber ./cmd/pvc-plumber
+
+    - name: Build Docker image
+      run: docker build -t pvc-plumber:test .
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.22'
+
+    - name: golangci-lint
+      uses: golangci/golangci-lint-action@v4
+      with:
+        version: v1.55.2
+        args: --timeout=5m
