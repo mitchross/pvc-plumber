@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -199,5 +200,73 @@ func TestHandleReadyz(t *testing.T) {
 
 	if response["status"] != "ok" {
 		t.Errorf("Status = %v, want ok", response["status"])
+	}
+}
+
+func TestHandleMetrics(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := New(nil, logger)
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+
+	handler.HandleMetrics(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("Status = %v, want %v", w.Code, http.StatusOK)
+	}
+
+	body := w.Body.String()
+
+	// Check for Prometheus format
+	if !strings.Contains(body, "# HELP") {
+		t.Error("Expected metrics output to contain # HELP comments")
+	}
+	if !strings.Contains(body, "# TYPE") {
+		t.Error("Expected metrics output to contain # TYPE comments")
+	}
+	if !strings.Contains(body, "pvc_plumber_requests_total") {
+		t.Error("Expected metrics output to contain pvc_plumber_requests_total")
+	}
+	if !strings.Contains(body, "pvc_plumber_requests_errors_total") {
+		t.Error("Expected metrics output to contain pvc_plumber_requests_errors_total")
+	}
+
+	// Check content type
+	contentType := w.Header().Get("Content-Type")
+	if !strings.Contains(contentType, "text/plain") {
+		t.Errorf("Content-Type = %v, want text/plain", contentType)
+	}
+}
+
+func TestMetricsCounters(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Create a mock server that returns success
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <KeyCount>1</KeyCount>
+</ListBucketResult>`))
+	}))
+	defer server.Close()
+
+	s3Client := s3.NewClient(server.URL, "test-bucket", &http.Client{Timeout: 5 * time.Second})
+	handler := New(s3Client, logger)
+
+	// Make a request to /exists
+	req := httptest.NewRequest("GET", "/exists/test-ns/test-pvc", nil)
+	w := httptest.NewRecorder()
+	handler.HandleExists(w, req)
+
+	// Check metrics
+	metricsReq := httptest.NewRequest("GET", "/metrics", nil)
+	metricsW := httptest.NewRecorder()
+	handler.HandleMetrics(metricsW, metricsReq)
+
+	body := metricsW.Body.String()
+	if !strings.Contains(body, "pvc_plumber_requests_total 1") {
+		t.Errorf("Expected requests_total to be 1, got: %s", body)
 	}
 }

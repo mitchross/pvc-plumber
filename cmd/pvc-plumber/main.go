@@ -64,6 +64,7 @@ func main() {
 	mux.HandleFunc("/exists/", h.HandleExists)
 	mux.HandleFunc("/healthz", h.HandleHealthz)
 	mux.HandleFunc("/readyz", h.HandleReadyz)
+	mux.HandleFunc("/metrics", h.HandleMetrics)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

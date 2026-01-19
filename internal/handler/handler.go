@@ -2,15 +2,19 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/mitchross/pvc-pulmber/internal/s3"
 )
 
 type Handler struct {
-	s3Client *s3.Client
-	logger   *slog.Logger
+	s3Client       *s3.Client
+	logger         *slog.Logger
+	requestsTotal  atomic.Int64
+	requestsErrors atomic.Int64
 }
 
 func New(s3Client *s3.Client, logger *slog.Logger) *Handler {
@@ -21,6 +25,8 @@ func New(s3Client *s3.Client, logger *slog.Logger) *Handler {
 }
 
 func (h *Handler) HandleExists(w http.ResponseWriter, r *http.Request) {
+	h.requestsTotal.Add(1)
+
 	// Extract namespace and pvc from path
 	// Expected path: /exists/{namespace}/{pvc}
 	path := r.URL.Path
@@ -44,6 +50,7 @@ func (h *Handler) HandleExists(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if namespace == "" || pvc == "" {
+		h.requestsErrors.Add(1)
 		h.logger.Warn("invalid request path", "path", path)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -57,6 +64,10 @@ func (h *Handler) HandleExists(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("checking backup", "namespace", namespace, "pvc", pvc)
 
 	result := h.s3Client.CheckBackupExists(r.Context(), namespace, pvc)
+
+	if result.Error != "" {
+		h.requestsErrors.Add(1)
+	}
 
 	h.logger.Info("backup check complete",
 		"namespace", namespace,
@@ -76,4 +87,14 @@ func (h *Handler) HandleHealthz(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleReadyz(w http.ResponseWriter, r *http.Request) {
 	// Same as healthz for now
 	h.HandleHealthz(w, r)
+}
+
+func (h *Handler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintf(w, "# HELP pvc_plumber_requests_total Total number of backup check requests\n")
+	fmt.Fprintf(w, "# TYPE pvc_plumber_requests_total counter\n")
+	fmt.Fprintf(w, "pvc_plumber_requests_total %d\n", h.requestsTotal.Load())
+	fmt.Fprintf(w, "# HELP pvc_plumber_requests_errors_total Total number of failed backup check requests\n")
+	fmt.Fprintf(w, "# TYPE pvc_plumber_requests_errors_total counter\n")
+	fmt.Fprintf(w, "pvc_plumber_requests_errors_total %d\n", h.requestsErrors.Load())
 }
