@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/mitchross/pvc-pulmber/internal/s3"
+	"github.com/mitchross/pvc-plumber/internal/s3"
 )
 
 type Handler struct {

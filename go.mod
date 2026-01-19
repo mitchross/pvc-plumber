@@ -1,3 +1,3 @@
-module github.com/mitchross/pvc-pulmber
+module github.com/mitchross/pvc-plumber
 
 go 1.22

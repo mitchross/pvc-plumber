@@ -1,7 +1,7 @@
 # pvc-plumber
 
-[![Build and Test](https://github.com/mitchross/pvc-pulmber/actions/workflows/build.yaml/badge.svg)](https://github.com/mitchross/pvc-pulmber/actions/workflows/build.yaml)
-[![Release](https://github.com/mitchross/pvc-pulmber/actions/workflows/release.yaml/badge.svg)](https://github.com/mitchross/pvc-pulmber/actions/workflows/release.yaml)
+[![Build and Test](https://github.com/mitchross/pvc-plumber/actions/workflows/build.yaml/badge.svg)](https://github.com/mitchross/pvc-plumber/actions/workflows/build.yaml)
+[![Release](https://github.com/mitchross/pvc-plumber/actions/workflows/release.yaml/badge.svg)](https://github.com/mitchross/pvc-plumber/actions/workflows/release.yaml)
 
 Lightweight K8s service that checks if PVC backups exist in S3. Enables zero-touch disaster recovery with Kyverno + VolSync.
 
@@ -45,7 +45,7 @@ When a PVC is created:
 docker run -p 8080:8080 \
   -e S3_ENDPOINT=http://192.168.10.133:30292 \
   -e S3_BUCKET=volsync-backup \
-  ghcr.io/mitchross/pvc-pulmber:latest
+  ghcr.io/mitchross/pvc-plumber:latest
 ```
 
 ### Using Kubernetes
@@ -68,7 +68,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-pulmber:latest
+        image: ghcr.io/mitchross/pvc-plumber:latest
         ports:
         - containerPort: 8080
           name: http
@@ -244,7 +244,7 @@ make docker-build-debug
 docker run -p 8080:8080 \
   -e S3_ENDPOINT=http://host.docker.internal:9000 \
   -e S3_BUCKET=test-bucket \
-  ghcr.io/mitchross/pvc-pulmber:latest
+  ghcr.io/mitchross/pvc-plumber:latest
 ```
 
 ### Testing with MinIO
@@ -390,4 +390,4 @@ This project is open source and available under the MIT License.
 
 ## Support
 
-For issues and questions, please open an issue on GitHub: https://github.com/mitchross/pvc-pulmber/issues
+For issues and questions, please open an issue on GitHub: https://github.com/mitchross/pvc-plumber/issues

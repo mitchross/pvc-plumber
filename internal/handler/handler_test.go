@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mitchross/pvc-pulmber/internal/s3"
+	"github.com/mitchross/pvc-plumber/internal/s3"
 )
 
 func TestHandleExists(t *testing.T) {
