@@ -271,14 +271,14 @@ func TestLoad_KopiaBackend(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	tests := []struct {
-		name            string
-		envVars         map[string]string
-		wantErr         bool
-		wantBackend     string
-		wantKopiaPath   string
-		wantTimeout     time.Duration
-		wantPort        string
-		wantLogLevel    string
+		name          string
+		envVars       map[string]string
+		wantErr       bool
+		wantBackend   string
+		wantKopiaPath string
+		wantTimeout   time.Duration
+		wantPort      string
+		wantLogLevel  string
 	}{
 		{
 			name: "valid kopia-fs config",

@@ -8,6 +8,8 @@ import (
 	"testing"
 )
 
+const backendKopiaFS = "kopia-fs"
+
 // mockExecutor implements CommandExecutor for testing
 type mockExecutor struct {
 	output []byte
@@ -108,8 +110,8 @@ func TestCheckBackupExists_Found(t *testing.T) {
 	if result.Pvc != "test-pvc" {
 		t.Errorf("Pvc = %v, want test-pvc", result.Pvc)
 	}
-	if result.Backend != "kopia-fs" {
-		t.Errorf("Backend = %v, want kopia-fs", result.Backend)
+	if result.Backend != backendKopiaFS {
+		t.Errorf("Backend = %v, want %s", result.Backend, backendKopiaFS)
 	}
 	if result.Error != "" {
 		t.Errorf("Error = %v, want empty", result.Error)
@@ -138,8 +140,8 @@ func TestCheckBackupExists_NotFound(t *testing.T) {
 	if result.Pvc != "bar" {
 		t.Errorf("Pvc = %v, want bar", result.Pvc)
 	}
-	if result.Backend != "kopia-fs" {
-		t.Errorf("Backend = %v, want kopia-fs", result.Backend)
+	if result.Backend != backendKopiaFS {
+		t.Errorf("Backend = %v, want %s", result.Backend, backendKopiaFS)
 	}
 	if result.Error != "" {
 		t.Errorf("Error = %v, want empty", result.Error)
@@ -170,8 +172,8 @@ func TestCheckBackupExists_CommandError(t *testing.T) {
 	if result.Pvc != "test-pvc" {
 		t.Errorf("Pvc = %v, want test-pvc", result.Pvc)
 	}
-	if result.Backend != "kopia-fs" {
-		t.Errorf("Backend = %v, want kopia-fs", result.Backend)
+	if result.Backend != backendKopiaFS {
+		t.Errorf("Backend = %v, want %s", result.Backend, backendKopiaFS)
 	}
 }
 

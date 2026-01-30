@@ -39,23 +39,30 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 
 	objectCh := c.minioClient.ListObjects(ctx, c.bucket, opts)
 
-	exists := false
-	for object := range objectCh {
-		if object.Err != nil {
-			return backend.CheckResult{
-				Exists:    false,
-				Namespace: namespace,
-				Pvc:       pvc,
-				Backend:   "s3",
-				Error:     fmt.Sprintf("failed to list objects: %v", object.Err),
-			}
+	// Check if any object exists (MaxKeys=1, so at most one result)
+	object, ok := <-objectCh
+	if !ok {
+		// Channel closed with no objects
+		return backend.CheckResult{
+			Exists:    false,
+			Namespace: namespace,
+			Pvc:       pvc,
+			Backend:   "s3",
 		}
-		exists = true
-		break // We only need to know if at least one exists
+	}
+
+	if object.Err != nil {
+		return backend.CheckResult{
+			Exists:    false,
+			Namespace: namespace,
+			Pvc:       pvc,
+			Backend:   "s3",
+			Error:     fmt.Sprintf("failed to list objects: %v", object.Err),
+		}
 	}
 
 	return backend.CheckResult{
-		Exists:    exists,
+		Exists:    true,
 		Namespace: namespace,
 		Pvc:       pvc,
 		Backend:   "s3",
