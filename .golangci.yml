@@ -19,8 +19,6 @@ linters-settings:
   errcheck:
     check-type-assertions: true
     check-blank: false
-  govet:
-    check-shadowing: true
   gofmt:
     simplify: true
   misspell:
