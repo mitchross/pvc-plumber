@@ -3,26 +3,36 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
 type Config struct {
-	S3Endpoint  string
-	S3Bucket    string
+	// Common settings
+	BackendType string
 	HTTPTimeout time.Duration
 	Port        string
 	LogLevel    string
+
+	// S3 backend settings
+	S3Endpoint  string
+	S3Bucket    string
+	S3AccessKey string
+	S3SecretKey string
+	S3Secure    bool
+
+	// Kopia backend settings
+	KopiaRepositoryPath string
 }
 
 func Load() (*Config, error) {
-	s3Endpoint := os.Getenv("S3_ENDPOINT")
-	if s3Endpoint == "" {
-		return nil, fmt.Errorf("S3_ENDPOINT is required")
+	// Common settings
+	backendType := os.Getenv("BACKEND_TYPE")
+	if backendType == "" {
+		backendType = "s3"
 	}
-
-	s3Bucket := os.Getenv("S3_BUCKET")
-	if s3Bucket == "" {
-		return nil, fmt.Errorf("S3_BUCKET is required")
+	if backendType != "s3" && backendType != "kopia-fs" {
+		return nil, fmt.Errorf("invalid BACKEND_TYPE: %s (must be 's3' or 'kopia-fs')", backendType)
 	}
 
 	httpTimeout := 3 * time.Second
@@ -44,11 +54,71 @@ func Load() (*Config, error) {
 		logLevel = "info"
 	}
 
-	return &Config{
-		S3Endpoint:  s3Endpoint,
-		S3Bucket:    s3Bucket,
+	cfg := &Config{
+		BackendType: backendType,
 		HTTPTimeout: httpTimeout,
 		Port:        port,
 		LogLevel:    logLevel,
-	}, nil
+	}
+
+	// Backend-specific validation
+	switch backendType {
+	case "s3":
+		if err := loadS3Config(cfg); err != nil {
+			return nil, err
+		}
+	case "kopia-fs":
+		if err := loadKopiaConfig(cfg); err != nil {
+			return nil, err
+		}
+	}
+
+	return cfg, nil
+}
+
+func loadS3Config(cfg *Config) error {
+	cfg.S3Endpoint = os.Getenv("S3_ENDPOINT")
+	if cfg.S3Endpoint == "" {
+		return fmt.Errorf("S3_ENDPOINT is required")
+	}
+
+	cfg.S3Bucket = os.Getenv("S3_BUCKET")
+	if cfg.S3Bucket == "" {
+		return fmt.Errorf("S3_BUCKET is required")
+	}
+
+	cfg.S3AccessKey = os.Getenv("S3_ACCESS_KEY")
+	if cfg.S3AccessKey == "" {
+		return fmt.Errorf("S3_ACCESS_KEY is required")
+	}
+
+	cfg.S3SecretKey = os.Getenv("S3_SECRET_KEY")
+	if cfg.S3SecretKey == "" {
+		return fmt.Errorf("S3_SECRET_KEY is required")
+	}
+
+	cfg.S3Secure = false
+	if secureStr := os.Getenv("S3_SECURE"); secureStr != "" {
+		var err error
+		cfg.S3Secure, err = strconv.ParseBool(secureStr)
+		if err != nil {
+			return fmt.Errorf("invalid S3_SECURE: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func loadKopiaConfig(cfg *Config) error {
+	cfg.KopiaRepositoryPath = os.Getenv("KOPIA_REPOSITORY_PATH")
+	if cfg.KopiaRepositoryPath == "" {
+		cfg.KopiaRepositoryPath = "/repository"
+	}
+
+	// Verify path exists
+	if _, err := os.Stat(cfg.KopiaRepositoryPath); os.IsNotExist(err) {
+		return fmt.Errorf("KOPIA_REPOSITORY_PATH %s does not exist", cfg.KopiaRepositoryPath)
+	}
+
+	return nil
 }

@@ -1,26 +1,32 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
 
-	"github.com/mitchross/pvc-plumber/internal/s3"
+	"github.com/mitchross/pvc-plumber/internal/backend"
 )
 
+// BackendClient interface for dependency injection and testing
+type BackendClient interface {
+	CheckBackupExists(ctx context.Context, namespace, pvc string) backend.CheckResult
+}
+
 type Handler struct {
-	s3Client       *s3.Client
+	backend        BackendClient
 	logger         *slog.Logger
 	requestsTotal  atomic.Int64
 	requestsErrors atomic.Int64
 }
 
-func New(s3Client *s3.Client, logger *slog.Logger) *Handler {
+func New(backend BackendClient, logger *slog.Logger) *Handler {
 	return &Handler{
-		s3Client: s3Client,
-		logger:   logger,
+		backend: backend,
+		logger:  logger,
 	}
 }
 
@@ -63,7 +69,7 @@ func (h *Handler) HandleExists(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("checking backup", "namespace", namespace, "pvc", pvc)
 
-	result := h.s3Client.CheckBackupExists(r.Context(), namespace, pvc)
+	result := h.backend.CheckBackupExists(r.Context(), namespace, pvc)
 
 	if result.Error != "" {
 		h.requestsErrors.Add(1)
@@ -73,7 +79,7 @@ func (h *Handler) HandleExists(w http.ResponseWriter, r *http.Request) {
 		"namespace", namespace,
 		"pvc", pvc,
 		"exists", result.Exists,
-		"keyCount", result.KeyCount)
+		"backend", result.Backend)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
