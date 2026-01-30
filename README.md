@@ -404,7 +404,7 @@ The service is composed of four main components:
 
 ### Prerequisites
 
-- Go 1.22 or later
+- Go 1.24 or later
 - Docker (optional, for building images)
 - Make (optional, for using Makefile targets)
 - kopia binary (for testing kopia-fs backend)
