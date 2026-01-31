@@ -1,3 +1,6 @@
+# Kopia binary stage
+FROM kopia/kopia:latest AS kopia
+
 # Build stage
 FROM golang:1.24-alpine AS builder
 
@@ -14,18 +17,21 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o pvc-plumber ./cmd/pvc-plumber
 
 # Final stage - with shell for debugging
-FROM alpine:latest
+FROM alpine:3.21
 
-RUN apk --no-cache add ca-certificates curl
+RUN apk add --no-cache ca-certificates curl tzdata
 
 WORKDIR /
 
-# Copy binary from builder
+# Copy pvc-plumber binary
 COPY --from=builder /build/pvc-plumber /pvc-plumber
 
-# Create non-root user
-RUN addgroup -g 1000 plumber && \
-    adduser -D -u 1000 -G plumber plumber
+# Copy kopia binary
+COPY --from=kopia /bin/kopia /usr/local/bin/kopia
+
+# Create non-root user matching VolSync mover UID
+RUN addgroup -g 568 plumber && \
+    adduser -D -u 568 -G plumber plumber
 
 USER plumber:plumber
 
