@@ -184,8 +184,9 @@ Required when `BACKEND_TYPE=kopia-fs`:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `KOPIA_REPOSITORY_PATH` | No | `/repository` | Path to Kopia repository (must exist) |
+| `KOPIA_PASSWORD` | Yes | - | Repository password (from secret) |
 
-**Note:** The Kopia filesystem backend requires the `kopia` binary to be available in the container and the repository path to be mounted (typically via NFS).
+**Note:** The Kopia filesystem backend requires the `kopia` binary to be available in the container and the repository path to be mounted (typically via NFS). The password is used to decrypt the repository - this is the same password used when the repository was created by VolSync.
 
 ## Kubernetes Deployment Examples
 
@@ -290,6 +291,11 @@ spec:
           value: "kopia-fs"
         - name: KOPIA_REPOSITORY_PATH
           value: "/repository"
+        - name: KOPIA_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: volsync-kopia-secret
+              key: KOPIA_PASSWORD
         - name: LOG_LEVEL
           value: "info"
         volumeMounts:

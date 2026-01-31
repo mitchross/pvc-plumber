@@ -66,7 +66,7 @@ func main() {
 
 	case "kopia-fs":
 		logger.Info("initializing kopia-fs backend", "path", cfg.KopiaRepositoryPath)
-		kopiaClient := kopia.NewClient(cfg.KopiaRepositoryPath, logger)
+		kopiaClient := kopia.NewClient(cfg.KopiaRepositoryPath, cfg.KopiaPassword, logger)
 		if err := kopiaClient.Connect(context.Background()); err != nil {
 			logger.Error("failed to connect to kopia repository", "error", err)
 			os.Exit(1)

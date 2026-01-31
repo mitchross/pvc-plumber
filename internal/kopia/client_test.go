@@ -23,7 +23,7 @@ func (m *mockExecutor) Run(ctx context.Context, name string, args ...string) ([]
 func TestNewClient(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	client := NewClient("/test/path", logger)
+	client := NewClient("/test/path", "testpass", logger)
 
 	if client == nil {
 		t.Fatal("NewClient returned nil")
@@ -44,7 +44,7 @@ func TestConnect_Success(t *testing.T) {
 		err:    nil,
 	}
 
-	client := NewClientWithExecutor("/test/path", logger, mock)
+	client := NewClientWithExecutor("/test/path", "testpass", logger, mock)
 
 	err := client.Connect(context.Background())
 	if err != nil {
@@ -68,7 +68,7 @@ func TestConnect_Failure(t *testing.T) {
 		err:    errors.New("exit status 1"),
 	}
 
-	client := NewClientWithExecutor("/bad/path", logger, mock)
+	client := NewClientWithExecutor("/bad/path", "testpass", logger, mock)
 
 	err := client.Connect(context.Background())
 	if err == nil {
@@ -97,7 +97,7 @@ func TestCheckBackupExists_Found(t *testing.T) {
 		err:    nil,
 	}
 
-	client := NewClientWithExecutor("/repository", logger, mock)
+	client := NewClientWithExecutor("/repository", "testpass", logger, mock)
 
 	result := client.CheckBackupExists(context.Background(), "karakeep", "test-pvc")
 
@@ -127,7 +127,7 @@ func TestCheckBackupExists_NotFound(t *testing.T) {
 		err:    nil,
 	}
 
-	client := NewClientWithExecutor("/repository", logger, mock)
+	client := NewClientWithExecutor("/repository", "testpass", logger, mock)
 
 	result := client.CheckBackupExists(context.Background(), "foo", "bar")
 
@@ -156,7 +156,7 @@ func TestCheckBackupExists_CommandError(t *testing.T) {
 		err:    errors.New("command failed"),
 	}
 
-	client := NewClientWithExecutor("/repository", logger, mock)
+	client := NewClientWithExecutor("/repository", "testpass", logger, mock)
 
 	result := client.CheckBackupExists(context.Background(), "test-ns", "test-pvc")
 
@@ -185,7 +185,7 @@ func TestCheckBackupExists_InvalidJSON(t *testing.T) {
 		err:    nil,
 	}
 
-	client := NewClientWithExecutor("/repository", logger, mock)
+	client := NewClientWithExecutor("/repository", "testpass", logger, mock)
 
 	result := client.CheckBackupExists(context.Background(), "test-ns", "test-pvc")
 
@@ -203,7 +203,7 @@ func TestCheckBackupExists_Integration(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	client := NewClient("/repository", logger)
+	client := NewClient("/repository", "testpass", logger)
 
 	if err := client.Connect(context.Background()); err != nil {
 		t.Fatalf("Failed to connect: %v", err)

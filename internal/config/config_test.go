@@ -251,6 +251,7 @@ func TestLoad_KopiaBackend(t *testing.T) {
 	origVars := map[string]string{
 		"BACKEND_TYPE":          os.Getenv("BACKEND_TYPE"),
 		"KOPIA_REPOSITORY_PATH": os.Getenv("KOPIA_REPOSITORY_PATH"),
+		"KOPIA_PASSWORD":        os.Getenv("KOPIA_PASSWORD"),
 		"HTTP_TIMEOUT":          os.Getenv("HTTP_TIMEOUT"),
 		"PORT":                  os.Getenv("PORT"),
 		"LOG_LEVEL":             os.Getenv("LOG_LEVEL"),
@@ -285,6 +286,7 @@ func TestLoad_KopiaBackend(t *testing.T) {
 			envVars: map[string]string{
 				"BACKEND_TYPE":          "kopia-fs",
 				"KOPIA_REPOSITORY_PATH": tmpDir,
+				"KOPIA_PASSWORD":        "testpassword",
 				"HTTP_TIMEOUT":          "5s",
 				"PORT":                  "9090",
 				"LOG_LEVEL":             "debug",
@@ -309,6 +311,15 @@ func TestLoad_KopiaBackend(t *testing.T) {
 			envVars: map[string]string{
 				"BACKEND_TYPE":          "kopia-fs",
 				"KOPIA_REPOSITORY_PATH": "/nonexistent/path/to/repo",
+				"KOPIA_PASSWORD":        "testpassword",
+			},
+			wantErr: true,
+		},
+		{
+			name: "kopia-fs missing password",
+			envVars: map[string]string{
+				"BACKEND_TYPE":          "kopia-fs",
+				"KOPIA_REPOSITORY_PATH": tmpDir,
 			},
 			wantErr: true,
 		},

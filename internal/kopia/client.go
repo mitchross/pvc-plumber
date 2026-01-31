@@ -26,24 +26,27 @@ func (e *RealExecutor) Run(ctx context.Context, name string, args ...string) ([]
 // Client wraps kopia CLI for backup existence checks.
 type Client struct {
 	repoPath  string
+	password  string
 	logger    *slog.Logger
 	connected bool
 	executor  CommandExecutor
 }
 
 // NewClient creates a new Kopia client.
-func NewClient(repoPath string, logger *slog.Logger) *Client {
+func NewClient(repoPath, password string, logger *slog.Logger) *Client {
 	return &Client{
 		repoPath: repoPath,
+		password: password,
 		logger:   logger,
 		executor: &RealExecutor{},
 	}
 }
 
 // NewClientWithExecutor creates a new Kopia client with a custom executor (for testing).
-func NewClientWithExecutor(repoPath string, logger *slog.Logger, executor CommandExecutor) *Client {
+func NewClientWithExecutor(repoPath, password string, logger *slog.Logger, executor CommandExecutor) *Client {
 	return &Client{
 		repoPath: repoPath,
+		password: password,
 		logger:   logger,
 		executor: executor,
 	}
@@ -53,7 +56,9 @@ func NewClientWithExecutor(repoPath string, logger *slog.Logger, executor Comman
 func (c *Client) Connect(ctx context.Context) error {
 	c.logger.Info("connecting to kopia repository", "path", c.repoPath)
 
-	output, err := c.executor.Run(ctx, "kopia", "repository", "connect", "filesystem", "--path", c.repoPath)
+	output, err := c.executor.Run(ctx, "kopia", "repository", "connect", "filesystem",
+		"--path", c.repoPath,
+		"--password", c.password)
 	if err != nil {
 		c.logger.Error("failed to connect to kopia repository", "error", err, "output", string(output))
 		return fmt.Errorf("failed to connect to kopia repository: %w", err)

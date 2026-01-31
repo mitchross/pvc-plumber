@@ -23,6 +23,7 @@ type Config struct {
 
 	// Kopia backend settings
 	KopiaRepositoryPath string
+	KopiaPassword       string
 }
 
 func Load() (*Config, error) {
@@ -118,6 +119,11 @@ func loadKopiaConfig(cfg *Config) error {
 	// Verify path exists
 	if _, err := os.Stat(cfg.KopiaRepositoryPath); os.IsNotExist(err) {
 		return fmt.Errorf("KOPIA_REPOSITORY_PATH %s does not exist", cfg.KopiaRepositoryPath)
+	}
+
+	cfg.KopiaPassword = os.Getenv("KOPIA_PASSWORD")
+	if cfg.KopiaPassword == "" {
+		return fmt.Errorf("KOPIA_PASSWORD is required for kopia-fs backend")
 	}
 
 	return nil
