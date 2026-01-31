@@ -43,7 +43,7 @@ When a PVC is created:
 
 - **Multiple backends**: S3/MinIO and Kopia filesystem support
 - **Fail-open behavior**: Errors return `exists: false` to prevent PVC creation from hanging
-- **Lightweight**: Distroless image under 15MB
+- **Lightweight**: Alpine-based image with kopia included
 - **Backwards compatible**: Defaults to S3 backend
 - **Graceful shutdown**: Handles SIGTERM/SIGINT properly
 - **Structured logging**: JSON logs with configurable levels
@@ -61,7 +61,7 @@ docker run -p 8080:8080 \
   -e S3_ACCESS_KEY=your-access-key \
   -e S3_SECRET_KEY=your-secret-key \
   -e S3_SECURE=false \
-  ghcr.io/mitchross/pvc-plumber:latest
+  ghcr.io/mitchross/pvc-plumber:0.2.1
 ```
 
 ### Kopia Filesystem Backend
@@ -71,7 +71,7 @@ docker run -p 8080:8080 \
   -e BACKEND_TYPE=kopia-fs \
   -e KOPIA_REPOSITORY_PATH=/repository \
   -v /path/to/nfs/repo:/repository:ro \
-  ghcr.io/mitchross/pvc-plumber:latest
+  ghcr.io/mitchross/pvc-plumber:0.2.1
 ```
 
 ## API Documentation
@@ -209,7 +209,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:latest
+        image: ghcr.io/mitchross/pvc-plumber:0.2.1
         ports:
         - containerPort: 8080
           name: http
@@ -281,7 +281,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:latest  # Must include kopia binary
+        image: ghcr.io/mitchross/pvc-plumber:0.2.1  # Must include kopia binary
         ports:
         - containerPort: 8080
           name: http
@@ -488,10 +488,10 @@ curl http://localhost:8080/exists/my-namespace/my-pvc
 
 ## Security
 
-- Runs as non-root user
+- Runs as non-root user (UID 568, matching VolSync mover)
 - Read-only root filesystem compatible
 - No privilege escalation
-- Minimal attack surface (distroless base image)
+- Minimal attack surface (Alpine base image)
 - Store credentials in Kubernetes secrets
 
 ## Contributing
