@@ -72,7 +72,7 @@ func (c *Client) Connect(ctx context.Context) error {
 // CheckBackupExists checks if a backup exists for the given namespace/pvc.
 func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) backend.CheckResult {
 	// VolSync creates snapshots with source: {pvc}-backup@{namespace}:/data
-	source := fmt.Sprintf("%s-backup@%s", pvc, namespace)
+	source := fmt.Sprintf("%s-backup@%s:/data", pvc, namespace)
 
 	c.logger.Debug("checking kopia snapshot", "source", source)
 
