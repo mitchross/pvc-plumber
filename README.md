@@ -352,6 +352,10 @@ spec:
 
 ## Kyverno Integration Example
 
+### Recommended: Fail-Closed (Validate + Mutate)
+
+Use a validate rule to **deny PVC creation** if pvc-plumber is unreachable. This prevents data loss during disaster recovery — apps wait until pvc-plumber is healthy before creating PVCs.
+
 ```yaml
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
@@ -360,28 +364,69 @@ metadata:
 spec:
   background: false
   rules:
-  - name: check-and-restore-backup
-    match:
-      any:
-      - resources:
-          kinds:
-          - PersistentVolumeClaim
-    context:
-    - name: backupCheck
-      apiCall:
-        urlPath: "http://pvc-plumber.kube-system.svc.cluster.local:8080/exists/{{request.namespace}}/{{request.object.metadata.name}}"
-    preconditions:
-      all:
-      - key: "{{ backupCheck.exists || false }}"
-        operator: Equals
-        value: true
-    mutate:
-      patchStrategicMerge:
-        spec:
-          dataSourceRef:
-            kind: ReplicationDestination
-            apiGroup: volsync.backube
-            name: "{{request.object.metadata.name}}-restore"
+    # Rule 0: Gate PVC creation on pvc-plumber availability (FAIL-CLOSED)
+    - name: require-pvc-plumber-available
+      match:
+        any:
+          - resources:
+              kinds:
+                - PersistentVolumeClaim
+              operations:
+                - CREATE
+              selector:
+                matchExpressions:
+                  - key: backup
+                    operator: In
+                    values: ["hourly", "daily"]
+      context:
+        - name: plumberHealth
+          apiCall:
+            method: GET
+            service:
+              url: "http://pvc-plumber.volsync-system.svc.cluster.local/readyz"
+      validate:
+        message: >-
+          PVC Plumber is not available. Backup-labeled PVCs cannot be created
+          until PVC Plumber is healthy.
+        deny:
+          conditions:
+            all:
+              - key: "{{ plumberHealth || 'unavailable' }}"
+                operator: Equals
+                value: "unavailable"
+
+    # Rule 1: Add dataSourceRef if backup exists
+    - name: check-and-restore-backup
+      match:
+        any:
+          - resources:
+              kinds:
+                - PersistentVolumeClaim
+              operations:
+                - CREATE
+              selector:
+                matchExpressions:
+                  - key: backup
+                    operator: In
+                    values: ["hourly", "daily"]
+      context:
+        - name: backupCheck
+          apiCall:
+            method: GET
+            service:
+              url: "http://pvc-plumber.volsync-system.svc.cluster.local/exists/{{request.object.metadata.namespace}}/{{request.object.metadata.name}}"
+      preconditions:
+        all:
+          - key: "{{ backupCheck.exists || false }}"
+            operator: Equals
+            value: true
+      mutate:
+        patchStrategicMerge:
+          spec:
+            dataSourceRef:
+              kind: ReplicationDestination
+              apiGroup: volsync.backube
+              name: "{{request.object.metadata.name}}-backup"
 ```
 
 ## Architecture
