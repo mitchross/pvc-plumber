@@ -42,7 +42,8 @@ When a PVC is created:
 ### Key Features
 
 - **Multiple backends**: S3/MinIO and Kopia filesystem support
-- **Fail-open behavior**: Errors return `exists: false` to prevent PVC creation from hanging
+- **Fail-open at app level**: Errors return `exists: false` so pvc-plumber itself never blocks
+- **Fail-closed at Kyverno level**: Use a Kyverno validate rule to deny PVC creation if pvc-plumber is unreachable (recommended for disaster recovery safety)
 - **Lightweight**: Alpine-based image with kopia included
 - **Backwards compatible**: Defaults to S3 backend
 - **Graceful shutdown**: Handles SIGTERM/SIGINT properly
@@ -61,7 +62,7 @@ docker run -p 8080:8080 \
   -e S3_ACCESS_KEY=your-access-key \
   -e S3_SECRET_KEY=your-secret-key \
   -e S3_SECURE=false \
-  ghcr.io/mitchross/pvc-plumber:0.2.1
+  ghcr.io/mitchross/pvc-plumber:1.1.0
 ```
 
 ### Kopia Filesystem Backend
@@ -71,7 +72,7 @@ docker run -p 8080:8080 \
   -e BACKEND_TYPE=kopia-fs \
   -e KOPIA_REPOSITORY_PATH=/repository \
   -v /path/to/nfs/repo:/repository:ro \
-  ghcr.io/mitchross/pvc-plumber:0.2.1
+  ghcr.io/mitchross/pvc-plumber:1.1.0
 ```
 
 ## API Documentation
@@ -210,7 +211,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:0.2.1
+        image: ghcr.io/mitchross/pvc-plumber:1.1.0
         ports:
         - containerPort: 8080
           name: http
@@ -282,7 +283,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:0.2.1  # Must include kopia binary
+        image: ghcr.io/mitchross/pvc-plumber:1.1.0  # Must include kopia binary
         ports:
         - containerPort: 8080
           name: http
