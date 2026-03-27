@@ -42,6 +42,7 @@ When a PVC is created:
 ### Key Features
 
 - **Multiple backends**: S3/MinIO and Kopia filesystem support
+- **Cache with pre-warm**: On startup, scans all kopia snapshots in one call and caches results. Every `/exists/` request is an instant cache hit — no per-request subprocess overhead
 - **Fail-open at app level**: Errors return `exists: false` so pvc-plumber itself never blocks
 - **Fail-closed at Kyverno level**: Use a Kyverno validate rule to deny PVC creation if pvc-plumber is unreachable (recommended for disaster recovery safety)
 - **Lightweight**: Alpine-based image with kopia included
@@ -62,7 +63,7 @@ docker run -p 8080:8080 \
   -e S3_ACCESS_KEY=your-access-key \
   -e S3_SECRET_KEY=your-secret-key \
   -e S3_SECURE=false \
-  ghcr.io/mitchross/pvc-plumber:1.1.0
+  ghcr.io/mitchross/pvc-plumber:1.3.0
 ```
 
 ### Kopia Filesystem Backend
@@ -72,7 +73,7 @@ docker run -p 8080:8080 \
   -e BACKEND_TYPE=kopia-fs \
   -e KOPIA_REPOSITORY_PATH=/repository \
   -v /path/to/nfs/repo:/repository:ro \
-  ghcr.io/mitchross/pvc-plumber:1.1.0
+  ghcr.io/mitchross/pvc-plumber:1.3.0
 ```
 
 ## API Documentation
@@ -163,6 +164,7 @@ All configuration is done via environment variables.
 |----------|----------|---------|-------------|
 | `BACKEND_TYPE` | No | `s3` | Backend type: `s3` or `kopia-fs` |
 | `HTTP_TIMEOUT` | No | `3s` | Request timeout (e.g., `5s`, `500ms`) |
+| `CACHE_TTL` | No | `60s` | Cache TTL for backup existence checks (e.g., `30s`, `2m`) |
 | `PORT` | No | `8080` | HTTP server port |
 | `LOG_LEVEL` | No | `info` | Log level: `debug`, `info`, `warn`, `error` |
 
@@ -211,7 +213,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:1.1.0
+        image: ghcr.io/mitchross/pvc-plumber:1.3.0
         ports:
         - containerPort: 8080
           name: http
@@ -283,7 +285,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:1.1.0  # Must include kopia binary
+        image: ghcr.io/mitchross/pvc-plumber:1.3.0  # Must include kopia binary
         ports:
         - containerPort: 8080
           name: http
@@ -437,7 +439,8 @@ The service is composed of four main components:
 2. **Backend Interface** (`internal/backend`): Defines the common `CheckResult` type
 3. **S3 Client** (`internal/s3`): Uses minio-go for authenticated S3 requests
 4. **Kopia Client** (`internal/kopia`): Wraps the kopia CLI for snapshot queries
-5. **HTTP Handlers** (`internal/handler`): Exposes REST API endpoints
+5. **Cache Layer** (`internal/cache`): In-memory TTL cache with startup pre-warm. Pre-warm runs `kopia snapshot list --all --json` once to populate all known sources
+6. **HTTP Handlers** (`internal/handler`): Exposes REST API endpoints
 
 ### Backend Details
 
@@ -449,8 +452,9 @@ The service is composed of four main components:
 **Kopia Backend:**
 - Shells out to `kopia` CLI binary
 - Connects to repository at startup: `kopia repository connect filesystem --path /repository`
-- Queries snapshots: `kopia snapshot list "{pvc}-backup@{namespace}" --json`
-- Parses JSON output to determine if snapshots exist
+- Pre-warms cache: `kopia snapshot list --all --json` scans all snapshots in one call
+- Per-request checks are served from cache (sub-millisecond). Cache misses fall back to `kopia snapshot list "{pvc}-backup@{namespace}" --json`
+- Cache TTL is configurable (default 60s)
 
 ## Local Development
 
