@@ -52,7 +52,7 @@ func main() {
 		"cache_ttl", cfg.CacheTTL)
 
 	// Create backend based on configuration
-	var backend handler.BackendClient
+	var backendClient handler.BackendClient
 	switch cfg.BackendType {
 	case "s3":
 		logger.Info("initializing s3 backend",
@@ -64,7 +64,7 @@ func main() {
 			logger.Error("failed to create S3 client", "error", err)
 			os.Exit(1)
 		}
-		backend = s3Client
+		backendClient = s3Client
 
 	case "kopia-fs":
 		logger.Info("initializing kopia-fs backend", "path", cfg.KopiaRepositoryPath)
@@ -73,11 +73,23 @@ func main() {
 			logger.Error("failed to connect to kopia repository", "error", err)
 			os.Exit(1)
 		}
-		backend = kopiaClient
+		backendClient = kopiaClient
 	}
 
 	// Wrap backend with cache
-	cachedBackend := cache.New(backend, cfg.CacheTTL, logger)
+	cachedBackend := cache.New(backendClient, cfg.CacheTTL, logger)
+
+	// Pre-warm cache for kopia backend
+	if cfg.BackendType == "kopia-fs" {
+		if kopiaClient, ok := backendClient.(*kopia.Client); ok {
+			sources, err := kopiaClient.ListAllSources(context.Background())
+			if err != nil {
+				logger.Warn("cache pre-warm failed, will populate on demand", "error", err)
+			} else {
+				cachedBackend.PreWarm(sources)
+			}
+		}
+	}
 
 	// Create handlers
 	h := handler.New(cachedBackend, logger)

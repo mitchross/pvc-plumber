@@ -118,6 +118,49 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 	}
 }
 
+// snapshotSource represents the source field in kopia snapshot JSON output.
+type snapshotSource struct {
+	Host     string `json:"host"`
+	UserName string `json:"userName"`
+	Path     string `json:"path"`
+}
+
+type snapshotEntry struct {
+	Source snapshotSource `json:"source"`
+}
+
+// ListAllSources returns all unique backup sources as namespace/pvc pairs.
+// Uses "kopia snapshot list --all --json" — one call to scan the entire repo.
+func (c *Client) ListAllSources(ctx context.Context) (map[string]bool, error) {
+	c.logger.Info("listing all kopia snapshots for cache pre-warm")
+
+	output, err := c.executor.Run(ctx, "kopia", "snapshot", "list", "--all", "--json")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all snapshots: %w", err)
+	}
+
+	var entries []snapshotEntry
+	if err := json.Unmarshal(output, &entries); err != nil {
+		return nil, fmt.Errorf("failed to parse snapshot list: %w", err)
+	}
+
+	// Build set of namespace/pvc pairs that have backups
+	// Source format: userName={pvc}-backup, host={namespace}, path=/data
+	sources := make(map[string]bool)
+	for _, e := range entries {
+		userName := e.Source.UserName
+		namespace := e.Source.Host
+		if len(userName) > 7 && userName[len(userName)-7:] == "-backup" {
+			pvc := userName[:len(userName)-7]
+			key := namespace + "/" + pvc
+			sources[key] = true
+		}
+	}
+
+	c.logger.Info("snapshot scan complete", "unique_sources", len(sources))
+	return sources, nil
+}
+
 // IsConnected returns whether the client is connected to the repository.
 func (c *Client) IsConnected() bool {
 	return c.connected

@@ -38,6 +38,39 @@ func New(inner BackendClient, ttl time.Duration, logger *slog.Logger) *CachedCli
 	}
 }
 
+// PreWarm populates the cache with known backup sources.
+// Keys in the map are "namespace/pvc", values are whether a backup exists.
+func (c *CachedClient) PreWarm(sources map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	expiry := time.Now().Add(c.ttl)
+	for key, exists := range sources {
+		// Parse namespace/pvc from key
+		var namespace, pvc string
+		for i := 0; i < len(key); i++ {
+			if key[i] == '/' {
+				namespace = key[:i]
+				pvc = key[i+1:]
+				break
+			}
+		}
+		if namespace == "" || pvc == "" {
+			continue
+		}
+		c.items[key] = entry{
+			result: backend.CheckResult{
+				Exists:    exists,
+				Namespace: namespace,
+				Pvc:       pvc,
+				Backend:   "kopia-fs",
+			},
+			expiresAt: expiry,
+		}
+	}
+	c.logger.Info("cache pre-warmed", "entries", len(c.items))
+}
+
 func (c *CachedClient) CheckBackupExists(ctx context.Context, namespace, pvc string) backend.CheckResult {
 	key := namespace + "/" + pvc
 
