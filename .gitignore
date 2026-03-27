@@ -1,5 +1,5 @@
 # Binaries
-pvc-plumber
+/pvc-plumber
 *.exe
 *.exe~
 *.dll

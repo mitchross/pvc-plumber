@@ -11,6 +11,7 @@ type Config struct {
 	// Common settings
 	BackendType string
 	HTTPTimeout time.Duration
+	CacheTTL    time.Duration
 	Port        string
 	LogLevel    string
 
@@ -45,6 +46,15 @@ func Load() (*Config, error) {
 		httpTimeout = duration
 	}
 
+	cacheTTL := 60 * time.Second
+	if ttlStr := os.Getenv("CACHE_TTL"); ttlStr != "" {
+		duration, err := time.ParseDuration(ttlStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid CACHE_TTL: %w", err)
+		}
+		cacheTTL = duration
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -58,6 +68,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		BackendType: backendType,
 		HTTPTimeout: httpTimeout,
+		CacheTTL:    cacheTTL,
 		Port:        port,
 		LogLevel:    logLevel,
 	}

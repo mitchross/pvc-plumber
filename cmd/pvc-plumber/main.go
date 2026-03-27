@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mitchross/pvc-plumber/internal/cache"
 	"github.com/mitchross/pvc-plumber/internal/config"
 	"github.com/mitchross/pvc-plumber/internal/handler"
 	"github.com/mitchross/pvc-plumber/internal/kopia"
@@ -47,7 +48,8 @@ func main() {
 	logger.Info("starting pvc-plumber",
 		"backend", cfg.BackendType,
 		"port", cfg.Port,
-		"log_level", cfg.LogLevel)
+		"log_level", cfg.LogLevel,
+		"cache_ttl", cfg.CacheTTL)
 
 	// Create backend based on configuration
 	var backend handler.BackendClient
@@ -74,8 +76,11 @@ func main() {
 		backend = kopiaClient
 	}
 
+	// Wrap backend with cache
+	cachedBackend := cache.New(backend, cfg.CacheTTL, logger)
+
 	// Create handlers
-	h := handler.New(backend, logger)
+	h := handler.New(cachedBackend, logger)
 
 	// Setup HTTP server
 	mux := http.NewServeMux()
