@@ -91,8 +91,12 @@ func main() {
 		}
 	}
 
-	// Create handlers
-	h := handler.New(cachedBackend, logger)
+	// Create handlers — pass the raw backend as health checker (cache layer doesn't need health checks)
+	var healthChecker handler.HealthChecker
+	if hc, ok := backendClient.(handler.HealthChecker); ok {
+		healthChecker = hc
+	}
+	h := handler.NewWithHealthChecker(cachedBackend, healthChecker, logger)
 
 	// Setup HTTP server
 	mux := http.NewServeMux()

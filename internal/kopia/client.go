@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 
 	"github.com/mitchross/pvc-plumber/internal/backend"
@@ -164,4 +165,25 @@ func (c *Client) ListAllSources(ctx context.Context) (map[string]bool, error) {
 // IsConnected returns whether the client is connected to the repository.
 func (c *Client) IsConnected() bool {
 	return c.connected
+}
+
+// HealthCheck verifies the Kopia repository is accessible and the connection is valid.
+// Used by the readiness probe to ensure the backend can serve backup existence queries.
+func (c *Client) HealthCheck(ctx context.Context) error {
+	if !c.connected {
+		return fmt.Errorf("kopia repository not connected")
+	}
+
+	// Verify the repository path is still accessible (catches stale NFS mounts)
+	if _, err := os.Stat(c.repoPath); err != nil {
+		return fmt.Errorf("repository path inaccessible: %w", err)
+	}
+
+	// Verify kopia can still talk to the repository (catches credential/corruption issues)
+	_, err := c.executor.Run(ctx, "kopia", "repository", "status", "--json")
+	if err != nil {
+		return fmt.Errorf("kopia repository status failed: %w", err)
+	}
+
+	return nil
 }

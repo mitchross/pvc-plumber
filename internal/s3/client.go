@@ -29,6 +29,18 @@ func NewClient(endpoint, bucket, accessKey, secretKey string, secure bool) (*Cli
 	}, nil
 }
 
+// HealthCheck verifies the S3 backend is accessible by checking if the bucket exists.
+func (c *Client) HealthCheck(ctx context.Context) error {
+	exists, err := c.minioClient.BucketExists(ctx, c.bucket)
+	if err != nil {
+		return fmt.Errorf("s3 health check failed: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("s3 bucket %q does not exist", c.bucket)
+	}
+	return nil
+}
+
 func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) backend.CheckResult {
 	prefix := fmt.Sprintf("%s/%s/", namespace, pvc)
 

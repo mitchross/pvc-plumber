@@ -16,17 +16,38 @@ type BackendClient interface {
 	CheckBackupExists(ctx context.Context, namespace, pvc string) backend.CheckResult
 }
 
+// HealthChecker is an optional interface backends can implement for readiness checks.
+type HealthChecker interface {
+	HealthCheck(ctx context.Context) error
+}
+
 type Handler struct {
 	backend        BackendClient
+	healthChecker  HealthChecker
 	logger         *slog.Logger
 	requestsTotal  atomic.Int64
 	requestsErrors atomic.Int64
 }
 
 func New(backend BackendClient, logger *slog.Logger) *Handler {
-	return &Handler{
+	h := &Handler{
 		backend: backend,
 		logger:  logger,
+	}
+	// If the backend implements HealthChecker, use it for readiness
+	if hc, ok := backend.(HealthChecker); ok {
+		h.healthChecker = hc
+	}
+	return h
+}
+
+// NewWithHealthChecker creates a handler with an explicit health checker
+// (useful when the backend is wrapped in a cache layer).
+func NewWithHealthChecker(backend BackendClient, healthChecker HealthChecker, logger *slog.Logger) *Handler {
+	return &Handler{
+		backend:       backend,
+		healthChecker: healthChecker,
+		logger:        logger,
 	}
 }
 
@@ -91,8 +112,20 @@ func (h *Handler) HandleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleReadyz(w http.ResponseWriter, r *http.Request) {
-	// Same as healthz for now
-	h.HandleHealthz(w, r)
+	if h.healthChecker != nil {
+		if err := h.healthChecker.HealthCheck(r.Context()); err != nil {
+			h.logger.Warn("readiness check failed", "error", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status": "not ready",
+				"error":  err.Error(),
+			})
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (h *Handler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
