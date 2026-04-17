@@ -197,6 +197,87 @@ func TestCheckBackupExists_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHealthCheck_NotConnected(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	client := NewClient("/repository", "testpass", logger)
+
+	err := client.HealthCheck(context.Background())
+	if err == nil {
+		t.Error("HealthCheck should fail when client is not connected")
+	}
+}
+
+func TestHealthCheck_RepoPathMissing(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	mock := &mockExecutor{output: []byte("Connected to repository."), err: nil}
+	client := NewClientWithExecutor("/nonexistent/path/that/cannot/exist", "testpass", logger, mock)
+
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() failed: %v", err)
+	}
+
+	err := client.HealthCheck(context.Background())
+	if err == nil {
+		t.Error("HealthCheck should fail when repo path is inaccessible")
+	}
+}
+
+func TestHealthCheck_Success(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	tmpDir := t.TempDir()
+
+	mock := &mockExecutor{output: []byte("Connected to repository."), err: nil}
+	client := NewClientWithExecutor(tmpDir, "testpass", logger, mock)
+
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() failed: %v", err)
+	}
+
+	if err := client.HealthCheck(context.Background()); err != nil {
+		t.Errorf("HealthCheck() error = %v, want nil", err)
+	}
+}
+
+func TestHealthCheck_DoesNotInvokeKopia(t *testing.T) {
+	// Regression: HealthCheck used to run `kopia repository status` on every
+	// probe, which over NFS with a large repo frequently exceeded the kubelet
+	// probe timeout and was SIGKILL'd ("signal: killed"). The readiness path
+	// must not spawn a kopia subprocess.
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	tmpDir := t.TempDir()
+
+	// This executor panics if invoked — proves HealthCheck doesn't call it.
+	panicExec := &panickingExecutor{t: t}
+
+	client := NewClientWithExecutor(tmpDir, "testpass", logger, &mockExecutor{
+		output: []byte("Connected to repository."), err: nil,
+	})
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatalf("Connect() failed: %v", err)
+	}
+
+	// Swap to panicking executor AFTER connect succeeded.
+	client.executor = panicExec
+
+	if err := client.HealthCheck(context.Background()); err != nil {
+		t.Errorf("HealthCheck() error = %v, want nil", err)
+	}
+}
+
+// panickingExecutor fails the test if any command is run against it.
+type panickingExecutor struct {
+	t *testing.T
+}
+
+func (p *panickingExecutor) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	p.t.Errorf("executor.Run should not be called on the readiness path; got %s %v", name, args)
+	return nil, errors.New("unexpected subprocess invocation")
+}
+
 func TestCheckBackupExists_Integration(t *testing.T) {
 	// Skip in CI - this test requires a real kopia repository
 	t.Skip("Integration test - requires kopia repository")

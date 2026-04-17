@@ -167,22 +167,27 @@ func (c *Client) IsConnected() bool {
 	return c.connected
 }
 
-// HealthCheck verifies the Kopia repository is accessible and the connection is valid.
-// Used by the readiness probe to ensure the backend can serve backup existence queries.
+// HealthCheck verifies the Kopia repository is reachable at the mount level.
+// Used by the readiness probe.
+//
+// Intentionally cheap: just confirms (1) startup Connect() succeeded and
+// (2) the repository path still stat()s. Running `kopia repository status`
+// on every probe spawns a subprocess that takes >1s over NFS with large
+// repos, and the request context cancel (kubelet probe timeout) sends
+// SIGKILL mid-query — producing false-negative "signal: killed" readiness
+// failures that block the fail-closed PVC gate.
+//
+// Deep validation (credential issues, corruption) surfaces on the next
+// CheckBackupExists call, which returns an error to Kyverno; the
+// fail-closed validate rule then denies PVC creation — same safety
+// guarantee, without hammering kopia every 10 seconds.
 func (c *Client) HealthCheck(ctx context.Context) error {
 	if !c.connected {
 		return fmt.Errorf("kopia repository not connected")
 	}
 
-	// Verify the repository path is still accessible (catches stale NFS mounts)
 	if _, err := os.Stat(c.repoPath); err != nil {
 		return fmt.Errorf("repository path inaccessible: %w", err)
-	}
-
-	// Verify kopia can still talk to the repository (catches credential/corruption issues)
-	_, err := c.executor.Run(ctx, "kopia", "repository", "status", "--json")
-	if err != nil {
-		return fmt.Errorf("kopia repository status failed: %w", err)
 	}
 
 	return nil
