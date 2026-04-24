@@ -1,0 +1,84 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run /home/vanillax/.bun/install/global/node_modules/@drewpayment/mink/dist/cli.js session-start"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run /home/vanillax/.bun/install/global/node_modules/@drewpayment/mink/dist/cli.js session-stop"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run /home/vanillax/.bun/install/global/node_modules/@drewpayment/mink/dist/cli.js pre-read"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run /home/vanillax/.bun/install/global/node_modules/@drewpayment/mink/dist/cli.js pre-write"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run /home/vanillax/.bun/install/global/node_modules/@drewpayment/mink/dist/cli.js pre-write"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run /home/vanillax/.bun/install/global/node_modules/@drewpayment/mink/dist/cli.js post-read"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run /home/vanillax/.bun/install/global/node_modules/@drewpayment/mink/dist/cli.js post-write"
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run /home/vanillax/.bun/install/global/node_modules/@drewpayment/mink/dist/cli.js post-write"
+          }
+        ]
+      }
+    ]
+  }
+}
