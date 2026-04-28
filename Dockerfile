@@ -2,7 +2,9 @@
 FROM kopia/kopia:latest AS kopia
 
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+
+ARG TARGETARCH
 
 WORKDIR /build
 
