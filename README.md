@@ -3,18 +3,18 @@
 [![Build and Test](https://github.com/mitchross/pvc-plumber/actions/workflows/build.yaml/badge.svg)](https://github.com/mitchross/pvc-plumber/actions/workflows/build.yaml)
 [![Release](https://github.com/mitchross/pvc-plumber/actions/workflows/release.yaml/badge.svg)](https://github.com/mitchross/pvc-plumber/actions/workflows/release.yaml)
 
-Lightweight K8s service that checks if PVC backups exist. Supports S3 and Kopia filesystem backends. Enables zero-touch disaster recovery with Kyverno + VolSync.
+Lightweight K8s service that checks whether PVC backups exist in S3 or NFS-backed Kopia repositories. Enables zero-touch disaster recovery with Kyverno + VolSync.
 
 ## Overview
 
-**pvc-plumber** is a microservice designed to run in Kubernetes clusters to determine if a Persistent Volume Claim (PVC) should restore from backup or start fresh. It's intended to be called by Kyverno policies during PVC creation.
+**pvc-plumber** is a microservice designed to run in Kubernetes clusters to determine if a Persistent Volume Claim (PVC) has a backup in S3 or an NFS-mounted Kopia repository, should restore from backup, or should start fresh. It's intended to be called by Kyverno policies during PVC creation.
 
 ### Supported Backends
 
 | Backend | Description | Use Case |
 |---------|-------------|----------|
 | `s3` | S3/MinIO object storage | VolSync Restic backups to S3 |
-| `kopia-fs` | Kopia filesystem repository | VolSync Kopia backups on NFS |
+| `kopia-fs` | NFS-backed Kopia filesystem repository | VolSync Kopia backups on NFS |
 
 ### How It Works
 
@@ -41,7 +41,7 @@ When a PVC is created:
 
 ### Key Features
 
-- **Multiple backends**: S3/MinIO and Kopia filesystem support
+- **Multiple backends**: S3/MinIO and NFS-backed Kopia filesystem support
 - **Tri-state restore decisions**: `restore` when a backup exists, `fresh` when an authoritative check found none, and `unknown` for backend/query errors
 - **Cache with pre-warm**: On startup, scans all kopia snapshots in one call and caches authoritative results. Cache misses fall back to a per-PVC backend query
 - **Fail-closed safety contract**: `/exists` returns HTTP 503 for unknown backup truth so admission policy can deny PVC creation instead of letting apps initialize empty state
