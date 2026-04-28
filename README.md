@@ -63,7 +63,7 @@ docker run -p 8080:8080 \
   -e S3_ACCESS_KEY=your-access-key \
   -e S3_SECRET_KEY=your-secret-key \
   -e S3_SECURE=false \
-  ghcr.io/mitchross/pvc-plumber:1.5.0
+  ghcr.io/mitchross/pvc-plumber:1.5.1
 ```
 
 ### Kopia Filesystem Backend
@@ -74,13 +74,17 @@ docker run -p 8080:8080 \
   -e KOPIA_REPOSITORY_PATH=/repository \
   -e KOPIA_PASSWORD=your-repository-password \
   -v /path/to/nfs/repo:/repository:ro \
-  ghcr.io/mitchross/pvc-plumber:1.5.0
+  ghcr.io/mitchross/pvc-plumber:1.5.1
 ```
 
 ## API Documentation
 
 For the full boxes-and-arrows version of the restore/fresh/unknown flow, see
 [`docs/restore-decision-flow.md`](docs/restore-decision-flow.md).
+
+## Image Tags
+
+Use immutable semver tags such as `1.5.1` for cluster deployments. Release builds publish `1.5.1`, `1.5`, `1`, and `latest`; main-branch builds publish only `main` and `sha-*` snapshot tags.
 
 ### GET /exists/{namespace}/{pvc-name}
 
@@ -239,7 +243,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:1.5.0
+        image: ghcr.io/mitchross/pvc-plumber:1.5.1
         ports:
         - containerPort: 8080
           name: http
@@ -311,7 +315,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:1.5.0  # Must include kopia binary
+        image: ghcr.io/mitchross/pvc-plumber:1.5.1  # Must include kopia binary
         ports:
         - containerPort: 8080
           name: http
