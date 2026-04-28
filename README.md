@@ -36,15 +36,15 @@ When a PVC is created:
 3. pvc-plumber queries the configured backend:
    - **S3**: Lists objects at `{namespace}/{pvc-name}/`
    - **Kopia**: Lists snapshots for source `{pvc-name}-backup@{namespace}`
-4. Returns JSON indicating if backup exists
-5. Kyverno decides whether to restore from backup or create empty PVC
+4. Returns a tri-state decision: `restore`, `fresh`, or `unknown`
+5. Kyverno restores, creates fresh, or denies PVC creation when backup truth is unknown
 
 ### Key Features
 
 - **Multiple backends**: S3/MinIO and Kopia filesystem support
-- **Cache with pre-warm**: On startup, scans all kopia snapshots in one call and caches results. Every `/exists/` request is an instant cache hit — no per-request subprocess overhead
-- **Fail-open at app level**: Errors return `exists: false` so pvc-plumber itself never blocks
-- **Fail-closed at Kyverno level**: Use a Kyverno validate rule to deny PVC creation if pvc-plumber is unreachable (recommended for disaster recovery safety)
+- **Tri-state restore decisions**: `restore` when a backup exists, `fresh` when an authoritative check found none, and `unknown` for backend/query errors
+- **Cache with pre-warm**: On startup, scans all kopia snapshots in one call and caches authoritative results. Cache misses fall back to a per-PVC backend query
+- **Fail-closed safety contract**: `/exists` returns HTTP 503 for unknown backup truth so admission policy can deny PVC creation instead of letting apps initialize empty state
 - **Lightweight**: Alpine-based image with kopia included
 - **Backwards compatible**: Defaults to S3 backend
 - **Graceful shutdown**: Handles SIGTERM/SIGINT properly
@@ -63,7 +63,7 @@ docker run -p 8080:8080 \
   -e S3_ACCESS_KEY=your-access-key \
   -e S3_SECRET_KEY=your-secret-key \
   -e S3_SECURE=false \
-  ghcr.io/mitchross/pvc-plumber:1.3.0
+  ghcr.io/mitchross/pvc-plumber:1.5.0
 ```
 
 ### Kopia Filesystem Backend
@@ -72,15 +72,19 @@ docker run -p 8080:8080 \
 docker run -p 8080:8080 \
   -e BACKEND_TYPE=kopia-fs \
   -e KOPIA_REPOSITORY_PATH=/repository \
+  -e KOPIA_PASSWORD=your-repository-password \
   -v /path/to/nfs/repo:/repository:ro \
-  ghcr.io/mitchross/pvc-plumber:1.3.0
+  ghcr.io/mitchross/pvc-plumber:1.5.0
 ```
 
 ## API Documentation
 
+For the full boxes-and-arrows version of the restore/fresh/unknown flow, see
+[`docs/restore-decision-flow.md`](docs/restore-decision-flow.md).
+
 ### GET /exists/{namespace}/{pvc-name}
 
-Check if a backup exists for the given namespace and PVC.
+Check whether a PVC should restore from backup, start fresh, or be blocked because backup truth is unknown.
 
 **Request:**
 ```bash
@@ -91,9 +95,12 @@ curl http://localhost:8080/exists/karakeep/data-pvc
 ```json
 {
   "exists": true,
+  "decision": "restore",
+  "authoritative": true,
   "namespace": "karakeep",
   "pvc": "data-pvc",
-  "backend": "kopia-fs"
+  "backend": "kopia-fs",
+  "source": "data-pvc-backup@karakeep:/data"
 }
 ```
 
@@ -101,22 +108,36 @@ curl http://localhost:8080/exists/karakeep/data-pvc
 ```json
 {
   "exists": false,
-  "namespace": "karakeep",
-  "pvc": "data-pvc",
-  "backend": "kopia-fs"
-}
-```
-
-**Response (error - fail-open):**
-```json
-{
-  "exists": false,
+  "decision": "fresh",
+  "authoritative": true,
   "namespace": "karakeep",
   "pvc": "data-pvc",
   "backend": "kopia-fs",
+  "source": "data-pvc-backup@karakeep:/data"
+}
+```
+
+**Response (unknown/error, HTTP 503):**
+```json
+{
+  "exists": false,
+  "decision": "unknown",
+  "authoritative": false,
+  "namespace": "karakeep",
+  "pvc": "data-pvc",
+  "backend": "kopia-fs",
+  "source": "data-pvc-backup@karakeep:/data",
   "error": "failed to list snapshots: exit status 1"
 }
 ```
+
+Admission policy should treat only authoritative responses as safe:
+
+| `decision` | `authoritative` | HTTP | Meaning |
+|------------|------------------|------|---------|
+| `restore` | `true` | 200 | A backup exists; mutate the PVC with `dataSourceRef` |
+| `fresh` | `true` | 200 | The check succeeded and no backup exists; create an empty PVC |
+| `unknown` | `false` | 503 | The check failed or was not trustworthy; deny PVC creation |
 
 ### GET /healthz
 
@@ -152,6 +173,11 @@ pvc_plumber_requests_total 42
 # HELP pvc_plumber_requests_errors_total Total number of failed backup check requests
 # TYPE pvc_plumber_requests_errors_total counter
 pvc_plumber_requests_errors_total 0
+# HELP pvc_plumber_backup_check_total Total number of backup check results by backend and decision
+# TYPE pvc_plumber_backup_check_total counter
+pvc_plumber_backup_check_total{backend="kopia-fs",decision="restore"} 17
+pvc_plumber_backup_check_total{backend="kopia-fs",decision="fresh"} 3
+pvc_plumber_backup_check_total{backend="kopia-fs",decision="unknown"} 0
 ```
 
 ## Configuration
@@ -163,7 +189,7 @@ All configuration is done via environment variables.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `BACKEND_TYPE` | No | `s3` | Backend type: `s3` or `kopia-fs` |
-| `HTTP_TIMEOUT` | No | `3s` | Request timeout (e.g., `5s`, `500ms`) |
+| `HTTP_TIMEOUT` | No | `3s` | Per-request backend timeout for `/exists` checks (e.g., `5s`, `500ms`) |
 | `CACHE_TTL` | No | `60s` | Cache TTL for backup existence checks (e.g., `30s`, `2m`) |
 | `PORT` | No | `8080` | HTTP server port |
 | `LOG_LEVEL` | No | `info` | Log level: `debug`, `info`, `warn`, `error` |
@@ -213,7 +239,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:1.3.0
+        image: ghcr.io/mitchross/pvc-plumber:1.5.0
         ports:
         - containerPort: 8080
           name: http
@@ -285,7 +311,7 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:1.3.0  # Must include kopia binary
+        image: ghcr.io/mitchross/pvc-plumber:1.5.0  # Must include kopia binary
         ports:
         - containerPort: 8080
           name: http
@@ -365,6 +391,7 @@ metadata:
   name: restore-pvc-from-backup
 spec:
   background: false
+  validationFailureAction: Enforce
   rules:
     # Rule 0: Gate PVC creation on pvc-plumber availability (FAIL-CLOSED)
     - name: require-pvc-plumber-available
@@ -387,17 +414,55 @@ spec:
             service:
               url: "http://pvc-plumber.volsync-system.svc.cluster.local/readyz"
       validate:
+        failureAction: Enforce
         message: >-
           PVC Plumber is not available. Backup-labeled PVCs cannot be created
           until PVC Plumber is healthy.
         deny:
           conditions:
             all:
-              - key: "{{ plumberHealth || 'unavailable' }}"
-                operator: Equals
-                value: "unavailable"
+              - key: "{{ plumberHealth.status || 'unavailable' }}"
+                operator: NotEquals
+                value: "ok"
 
-    # Rule 1: Add dataSourceRef if backup exists
+    # Rule 1: Deny unknown per-PVC backup truth
+    - name: require-authoritative-backup-decision
+      match:
+        any:
+          - resources:
+              kinds:
+                - PersistentVolumeClaim
+              operations:
+                - CREATE
+              selector:
+                matchExpressions:
+                  - key: backup
+                    operator: In
+                    values: ["hourly", "daily"]
+      context:
+        - name: backupCheck
+          apiCall:
+            method: GET
+            service:
+              url: "http://pvc-plumber.volsync-system.svc.cluster.local/exists/{{request.object.metadata.namespace}}/{{request.object.metadata.name}}"
+      validate:
+        failureAction: Enforce
+        message: >-
+          PVC Plumber could not make an authoritative restore/fresh decision.
+        deny:
+          conditions:
+            any:
+              - key: "{{ backupCheck.authoritative || false }}"
+                operator: Equals
+                value: false
+              - key: "{{ backupCheck.decision || 'unknown' }}"
+                operator: Equals
+                value: "unknown"
+              - key: "{{ backupCheck.error || '' }}"
+                operator: NotEquals
+                value: ""
+
+    # Rule 2: Add dataSourceRef only for authoritative restore decisions
     - name: check-and-restore-backup
       match:
         any:
@@ -419,6 +484,12 @@ spec:
               url: "http://pvc-plumber.volsync-system.svc.cluster.local/exists/{{request.object.metadata.namespace}}/{{request.object.metadata.name}}"
       preconditions:
         all:
+          - key: "{{ backupCheck.authoritative || false }}"
+            operator: Equals
+            value: true
+          - key: "{{ backupCheck.decision || 'unknown' }}"
+            operator: Equals
+            value: "restore"
           - key: "{{ backupCheck.exists || false }}"
             operator: Equals
             value: true
@@ -436,7 +507,7 @@ spec:
 The service is composed of four main components:
 
 1. **Config Module** (`internal/config`): Loads and validates environment variables, supports backend-specific configuration
-2. **Backend Interface** (`internal/backend`): Defines the common `CheckResult` type
+2. **Backend Interface** (`internal/backend`): Defines the common tri-state `CheckResult` type
 3. **S3 Client** (`internal/s3`): Uses minio-go for authenticated S3 requests
 4. **Kopia Client** (`internal/kopia`): Wraps the kopia CLI for snapshot queries
 5. **Cache Layer** (`internal/cache`): In-memory TTL cache with startup pre-warm. Pre-warm runs `kopia snapshot list --all --json` once to populate all known sources
@@ -488,6 +559,7 @@ S3_SECRET_KEY=minioadmin \
 # Run with Kopia backend
 BACKEND_TYPE=kopia-fs \
 KOPIA_REPOSITORY_PATH=/path/to/repo \
+KOPIA_PASSWORD=your-repository-password \
 ./pvc-plumber
 ```
 

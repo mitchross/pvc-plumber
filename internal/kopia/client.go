@@ -87,11 +87,14 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 				"stderr", string(exitErr.Stderr))
 		}
 		return backend.CheckResult{
-			Exists:    false,
-			Namespace: namespace,
-			Pvc:       pvc,
-			Backend:   "kopia-fs",
-			Error:     fmt.Sprintf("failed to list snapshots: %v", err),
+			Exists:        false,
+			Decision:      backend.DecisionUnknown,
+			Authoritative: false,
+			Namespace:     namespace,
+			Pvc:           pvc,
+			Backend:       "kopia-fs",
+			Source:        source,
+			Error:         fmt.Sprintf("failed to list snapshots: %v", err),
 		}
 	}
 
@@ -100,22 +103,32 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 	if err := json.Unmarshal(output, &snapshots); err != nil {
 		c.logger.Error("failed to parse kopia output", "error", err, "output", string(output))
 		return backend.CheckResult{
-			Exists:    false,
-			Namespace: namespace,
-			Pvc:       pvc,
-			Backend:   "kopia-fs",
-			Error:     fmt.Sprintf("failed to parse kopia output: %v", err),
+			Exists:        false,
+			Decision:      backend.DecisionUnknown,
+			Authoritative: false,
+			Namespace:     namespace,
+			Pvc:           pvc,
+			Backend:       "kopia-fs",
+			Source:        source,
+			Error:         fmt.Sprintf("failed to parse kopia output: %v", err),
 		}
 	}
 
 	exists := len(snapshots) > 0
+	decision := backend.DecisionFresh
+	if exists {
+		decision = backend.DecisionRestore
+	}
 	c.logger.Debug("kopia snapshot check complete", "source", source, "exists", exists, "count", len(snapshots))
 
 	return backend.CheckResult{
-		Exists:    exists,
-		Namespace: namespace,
-		Pvc:       pvc,
-		Backend:   "kopia-fs",
+		Exists:        exists,
+		Decision:      decision,
+		Authoritative: true,
+		Namespace:     namespace,
+		Pvc:           pvc,
+		Backend:       "kopia-fs",
+		Source:        source,
 	}
 }
 

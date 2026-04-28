@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/mitchross/pvc-plumber/internal/backend"
 )
@@ -25,14 +28,23 @@ type Handler struct {
 	backend        BackendClient
 	healthChecker  HealthChecker
 	logger         *slog.Logger
+	requestTimeout time.Duration
 	requestsTotal  atomic.Int64
 	requestsErrors atomic.Int64
+	metricsMu      sync.Mutex
+	backupChecks   map[metricKey]int64
+}
+
+type metricKey struct {
+	backend  string
+	decision string
 }
 
 func New(backend BackendClient, logger *slog.Logger) *Handler {
 	h := &Handler{
-		backend: backend,
-		logger:  logger,
+		backend:      backend,
+		logger:       logger,
+		backupChecks: make(map[metricKey]int64),
 	}
 	// If the backend implements HealthChecker, use it for readiness
 	if hc, ok := backend.(HealthChecker); ok {
@@ -48,7 +60,12 @@ func NewWithHealthChecker(backend BackendClient, healthChecker HealthChecker, lo
 		backend:       backend,
 		healthChecker: healthChecker,
 		logger:        logger,
+		backupChecks:  make(map[metricKey]int64),
 	}
+}
+
+func (h *Handler) SetRequestTimeout(timeout time.Duration) {
+	h.requestTimeout = timeout
 }
 
 func (h *Handler) HandleExists(w http.ResponseWriter, r *http.Request) {
@@ -81,28 +98,43 @@ func (h *Handler) HandleExists(w http.ResponseWriter, r *http.Request) {
 		h.logger.Warn("invalid request path", "path", path)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"exists": false,
-			"error":  "invalid path format, expected /exists/{namespace}/{pvc}",
+		_ = json.NewEncoder(w).Encode(backend.CheckResult{
+			Exists:        false,
+			Decision:      backend.DecisionUnknown,
+			Authoritative: false,
+			Error:         "invalid path format, expected /exists/{namespace}/{pvc}",
 		})
 		return
 	}
 
 	h.logger.Info("checking backup", "namespace", namespace, "pvc", pvc)
 
-	result := h.backend.CheckBackupExists(r.Context(), namespace, pvc)
+	ctx := r.Context()
+	if h.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.requestTimeout)
+		defer cancel()
+	}
+
+	result := h.backend.CheckBackupExists(ctx, namespace, pvc)
 
 	if result.Error != "" {
 		h.requestsErrors.Add(1)
 	}
+	h.recordBackupCheck(result)
 
 	h.logger.Info("backup check complete",
 		"namespace", namespace,
 		"pvc", pvc,
 		"exists", result.Exists,
+		"decision", result.Decision,
+		"authoritative", result.Authoritative,
 		"backend", result.Backend)
 
 	w.Header().Set("Content-Type", "application/json")
+	if result.Error != "" || !result.Authoritative || result.Decision == backend.DecisionUnknown {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
 	_ = json.NewEncoder(w).Encode(result)
 }
 
@@ -136,4 +168,51 @@ func (h *Handler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "# HELP pvc_plumber_requests_errors_total Total number of failed backup check requests\n")
 	_, _ = fmt.Fprintf(w, "# TYPE pvc_plumber_requests_errors_total counter\n")
 	_, _ = fmt.Fprintf(w, "pvc_plumber_requests_errors_total %d\n", h.requestsErrors.Load())
+	_, _ = fmt.Fprintf(w, "# HELP pvc_plumber_backup_check_total Total number of backup check results by backend and decision\n")
+	_, _ = fmt.Fprintf(w, "# TYPE pvc_plumber_backup_check_total counter\n")
+	for _, sample := range h.backupCheckSamples() {
+		_, _ = fmt.Fprintf(w, "pvc_plumber_backup_check_total{backend=%q,decision=%q} %d\n", sample.backend, sample.decision, sample.value)
+	}
+}
+
+func (h *Handler) recordBackupCheck(result backend.CheckResult) {
+	backendName := result.Backend
+	if backendName == "" {
+		backendName = "unknown"
+	}
+	decision := result.Decision
+	if decision == "" {
+		decision = backend.DecisionUnknown
+	}
+
+	h.metricsMu.Lock()
+	h.backupChecks[metricKey{backend: backendName, decision: decision}]++
+	h.metricsMu.Unlock()
+}
+
+type metricSample struct {
+	backend  string
+	decision string
+	value    int64
+}
+
+func (h *Handler) backupCheckSamples() []metricSample {
+	h.metricsMu.Lock()
+	defer h.metricsMu.Unlock()
+
+	samples := make([]metricSample, 0, len(h.backupChecks))
+	for key, value := range h.backupChecks {
+		samples = append(samples, metricSample{
+			backend:  key.backend,
+			decision: key.decision,
+			value:    value,
+		})
+	}
+	sort.Slice(samples, func(i, j int) bool {
+		if samples[i].backend == samples[j].backend {
+			return samples[i].decision < samples[j].decision
+		}
+		return samples[i].backend < samples[j].backend
+	})
+	return samples
 }

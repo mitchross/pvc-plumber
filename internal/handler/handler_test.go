@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mitchross/pvc-plumber/internal/backend"
 )
@@ -22,74 +23,108 @@ func (m *mockBackendClient) CheckBackupExists(ctx context.Context, namespace, pv
 	return m.result
 }
 
+type deadlineCapturingBackend struct {
+	hasDeadline bool
+}
+
+func (m *deadlineCapturingBackend) CheckBackupExists(ctx context.Context, namespace, pvc string) backend.CheckResult {
+	_, m.hasDeadline = ctx.Deadline()
+	return backend.CheckResult{
+		Exists:        false,
+		Decision:      backend.DecisionFresh,
+		Authoritative: true,
+		Namespace:     namespace,
+		Pvc:           pvc,
+		Backend:       "kopia-fs",
+	}
+}
+
 func TestHandleExists(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	tests := []struct {
-		name        string
-		path        string
-		mockResult  backend.CheckResult
-		wantStatus  int
-		wantExists  bool
-		wantBackend string
-		wantError   bool
+		name              string
+		path              string
+		mockResult        backend.CheckResult
+		wantStatus        int
+		wantExists        bool
+		wantDecision      string
+		wantAuthoritative bool
+		wantBackend       string
+		wantError         bool
 	}{
 		{
 			name: "backup exists",
 			path: "/exists/karakeep/data-pvc",
 			mockResult: backend.CheckResult{
-				Exists:    true,
-				Namespace: "karakeep",
-				Pvc:       "data-pvc",
-				Backend:   "s3",
+				Exists:        true,
+				Decision:      backend.DecisionRestore,
+				Authoritative: true,
+				Namespace:     "karakeep",
+				Pvc:           "data-pvc",
+				Backend:       "s3",
 			},
-			wantStatus:  http.StatusOK,
-			wantExists:  true,
-			wantBackend: "s3",
-			wantError:   false,
+			wantStatus:        http.StatusOK,
+			wantExists:        true,
+			wantDecision:      backend.DecisionRestore,
+			wantAuthoritative: true,
+			wantBackend:       "s3",
+			wantError:         false,
 		},
 		{
 			name: "no backup",
 			path: "/exists/test-ns/test-pvc",
 			mockResult: backend.CheckResult{
-				Exists:    false,
-				Namespace: "test-ns",
-				Pvc:       "test-pvc",
-				Backend:   "kopia-fs",
+				Exists:        false,
+				Decision:      backend.DecisionFresh,
+				Authoritative: true,
+				Namespace:     "test-ns",
+				Pvc:           "test-pvc",
+				Backend:       "kopia-fs",
 			},
-			wantStatus:  http.StatusOK,
-			wantExists:  false,
-			wantBackend: "kopia-fs",
-			wantError:   false,
+			wantStatus:        http.StatusOK,
+			wantExists:        false,
+			wantDecision:      backend.DecisionFresh,
+			wantAuthoritative: true,
+			wantBackend:       "kopia-fs",
+			wantError:         false,
 		},
 		{
 			name: "backend error",
 			path: "/exists/error-ns/error-pvc",
 			mockResult: backend.CheckResult{
-				Exists:    false,
-				Namespace: "error-ns",
-				Pvc:       "error-pvc",
-				Backend:   "s3",
-				Error:     "connection failed",
+				Exists:        false,
+				Decision:      backend.DecisionUnknown,
+				Authoritative: false,
+				Namespace:     "error-ns",
+				Pvc:           "error-pvc",
+				Backend:       "s3",
+				Error:         "connection failed",
 			},
-			wantStatus:  http.StatusOK,
-			wantExists:  false,
-			wantBackend: "s3",
-			wantError:   true,
+			wantStatus:        http.StatusServiceUnavailable,
+			wantExists:        false,
+			wantDecision:      backend.DecisionUnknown,
+			wantAuthoritative: false,
+			wantBackend:       "s3",
+			wantError:         true,
 		},
 		{
-			name:       "invalid path - no pvc",
-			path:       "/exists/namespace-only",
-			wantStatus: http.StatusBadRequest,
-			wantExists: false,
-			wantError:  true,
+			name:              "invalid path - no pvc",
+			path:              "/exists/namespace-only",
+			wantStatus:        http.StatusBadRequest,
+			wantExists:        false,
+			wantDecision:      backend.DecisionUnknown,
+			wantAuthoritative: false,
+			wantError:         true,
 		},
 		{
-			name:       "invalid path - empty",
-			path:       "/exists/",
-			wantStatus: http.StatusBadRequest,
-			wantExists: false,
-			wantError:  true,
+			name:              "invalid path - empty",
+			path:              "/exists/",
+			wantStatus:        http.StatusBadRequest,
+			wantExists:        false,
+			wantDecision:      backend.DecisionUnknown,
+			wantAuthoritative: false,
+			wantError:         true,
 		},
 	}
 
@@ -114,6 +149,14 @@ func TestHandleExists(t *testing.T) {
 
 			if response.Exists != tt.wantExists {
 				t.Errorf("Exists = %v, want %v", response.Exists, tt.wantExists)
+			}
+
+			if response.Decision != tt.wantDecision {
+				t.Errorf("Decision = %v, want %v", response.Decision, tt.wantDecision)
+			}
+
+			if response.Authoritative != tt.wantAuthoritative {
+				t.Errorf("Authoritative = %v, want %v", response.Authoritative, tt.wantAuthoritative)
 			}
 
 			if tt.wantStatus == http.StatusOK && response.Backend != tt.wantBackend {
@@ -147,6 +190,22 @@ func TestHandleHealthz(t *testing.T) {
 
 	if response["status"] != "ok" {
 		t.Errorf("Status = %v, want ok", response["status"])
+	}
+}
+
+func TestHandleExistsAppliesRequestTimeout(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	mock := &deadlineCapturingBackend{}
+	handler := New(mock, logger)
+	handler.SetRequestTimeout(50 * time.Millisecond)
+
+	req := httptest.NewRequest("GET", "/exists/test-ns/test-pvc", nil)
+	w := httptest.NewRecorder()
+
+	handler.HandleExists(w, req)
+
+	if !mock.hasDeadline {
+		t.Fatal("backend context should have a deadline")
 	}
 }
 
@@ -212,7 +271,14 @@ func TestHandleMetrics(t *testing.T) {
 func TestMetricsCounters(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	mock := &mockBackendClient{result: backend.CheckResult{Exists: true, Namespace: "test-ns", Pvc: "test-pvc", Backend: "s3"}}
+	mock := &mockBackendClient{result: backend.CheckResult{
+		Exists:        true,
+		Decision:      backend.DecisionRestore,
+		Authoritative: true,
+		Namespace:     "test-ns",
+		Pvc:           "test-pvc",
+		Backend:       "s3",
+	}}
 	handler := New(mock, logger)
 
 	// Make a request to /exists
@@ -229,12 +295,23 @@ func TestMetricsCounters(t *testing.T) {
 	if !strings.Contains(body, "pvc_plumber_requests_total 1") {
 		t.Errorf("Expected requests_total to be 1, got: %s", body)
 	}
+	if !strings.Contains(body, `pvc_plumber_backup_check_total{backend="s3",decision="restore"} 1`) {
+		t.Errorf("Expected labeled restore counter, got: %s", body)
+	}
 }
 
 func TestMetricsErrorCounter(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	mock := &mockBackendClient{result: backend.CheckResult{Exists: false, Namespace: "test-ns", Pvc: "test-pvc", Backend: "s3", Error: "connection failed"}}
+	mock := &mockBackendClient{result: backend.CheckResult{
+		Exists:        false,
+		Decision:      backend.DecisionUnknown,
+		Authoritative: false,
+		Namespace:     "test-ns",
+		Pvc:           "test-pvc",
+		Backend:       "s3",
+		Error:         "connection failed",
+	}}
 	handler := New(mock, logger)
 
 	// Make a request to /exists that will result in error
@@ -250,5 +327,8 @@ func TestMetricsErrorCounter(t *testing.T) {
 	body := metricsW.Body.String()
 	if !strings.Contains(body, "pvc_plumber_requests_errors_total 1") {
 		t.Errorf("Expected errors_total to be 1, got: %s", body)
+	}
+	if !strings.Contains(body, `pvc_plumber_backup_check_total{backend="s3",decision="unknown"} 1`) {
+		t.Errorf("Expected labeled unknown counter, got: %s", body)
 	}
 }

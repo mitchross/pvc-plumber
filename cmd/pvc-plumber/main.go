@@ -97,6 +97,7 @@ func main() {
 		healthChecker = hc
 	}
 	h := handler.NewWithHealthChecker(cachedBackend, healthChecker, logger)
+	h.SetRequestTimeout(cfg.HTTPTimeout)
 
 	// Setup HTTP server
 	mux := http.NewServeMux()

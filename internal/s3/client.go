@@ -56,27 +56,36 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 	if !ok {
 		// Channel closed with no objects
 		return backend.CheckResult{
-			Exists:    false,
-			Namespace: namespace,
-			Pvc:       pvc,
-			Backend:   "s3",
+			Exists:        false,
+			Decision:      backend.DecisionFresh,
+			Authoritative: true,
+			Namespace:     namespace,
+			Pvc:           pvc,
+			Backend:       "s3",
+			Source:        prefix,
 		}
 	}
 
 	if object.Err != nil {
 		return backend.CheckResult{
-			Exists:    false,
-			Namespace: namespace,
-			Pvc:       pvc,
-			Backend:   "s3",
-			Error:     fmt.Sprintf("failed to list objects: %v", object.Err),
+			Exists:        false,
+			Decision:      backend.DecisionUnknown,
+			Authoritative: false,
+			Namespace:     namespace,
+			Pvc:           pvc,
+			Backend:       "s3",
+			Source:        prefix,
+			Error:         fmt.Sprintf("failed to list objects: %v", object.Err),
 		}
 	}
 
 	return backend.CheckResult{
-		Exists:    true,
-		Namespace: namespace,
-		Pvc:       pvc,
-		Backend:   "s3",
+		Exists:        true,
+		Decision:      backend.DecisionRestore,
+		Authoritative: true,
+		Namespace:     namespace,
+		Pvc:           pvc,
+		Backend:       "s3",
+		Source:        prefix,
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"testing"
+
+	"github.com/mitchross/pvc-plumber/internal/backend"
 )
 
 const backendKopiaFS = "kopia-fs"
@@ -104,6 +106,15 @@ func TestCheckBackupExists_Found(t *testing.T) {
 	if !result.Exists {
 		t.Error("Exists should be true")
 	}
+	if result.Decision != backend.DecisionRestore {
+		t.Errorf("Decision = %v, want %v", result.Decision, backend.DecisionRestore)
+	}
+	if !result.Authoritative {
+		t.Error("Authoritative should be true")
+	}
+	if result.Source != "test-pvc-backup@karakeep:/data" {
+		t.Errorf("Source = %v, want test-pvc-backup@karakeep:/data", result.Source)
+	}
 	if result.Namespace != "karakeep" {
 		t.Errorf("Namespace = %v, want karakeep", result.Namespace)
 	}
@@ -134,6 +145,15 @@ func TestCheckBackupExists_NotFound(t *testing.T) {
 	if result.Exists {
 		t.Error("Exists should be false")
 	}
+	if result.Decision != backend.DecisionFresh {
+		t.Errorf("Decision = %v, want %v", result.Decision, backend.DecisionFresh)
+	}
+	if !result.Authoritative {
+		t.Error("Authoritative should be true")
+	}
+	if result.Source != "bar-backup@foo:/data" {
+		t.Errorf("Source = %v, want bar-backup@foo:/data", result.Source)
+	}
 	if result.Namespace != "foo" {
 		t.Errorf("Namespace = %v, want foo", result.Namespace)
 	}
@@ -163,6 +183,12 @@ func TestCheckBackupExists_CommandError(t *testing.T) {
 	if result.Exists {
 		t.Error("Exists should be false on error")
 	}
+	if result.Decision != backend.DecisionUnknown {
+		t.Errorf("Decision = %v, want %v", result.Decision, backend.DecisionUnknown)
+	}
+	if result.Authoritative {
+		t.Error("Authoritative should be false on error")
+	}
 	if result.Error == "" {
 		t.Error("Error should not be empty on command failure")
 	}
@@ -191,6 +217,12 @@ func TestCheckBackupExists_InvalidJSON(t *testing.T) {
 
 	if result.Exists {
 		t.Error("Exists should be false on JSON parse error")
+	}
+	if result.Decision != backend.DecisionUnknown {
+		t.Errorf("Decision = %v, want %v", result.Decision, backend.DecisionUnknown)
+	}
+	if result.Authoritative {
+		t.Error("Authoritative should be false on JSON parse error")
 	}
 	if result.Error == "" {
 		t.Error("Error should not be empty on JSON parse failure")

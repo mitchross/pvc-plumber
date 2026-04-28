@@ -60,10 +60,13 @@ func (c *CachedClient) PreWarm(sources map[string]bool) {
 		}
 		c.items[key] = entry{
 			result: backend.CheckResult{
-				Exists:    exists,
-				Namespace: namespace,
-				Pvc:       pvc,
-				Backend:   "kopia-fs",
+				Exists:        exists,
+				Decision:      decisionForExists(exists),
+				Authoritative: true,
+				Namespace:     namespace,
+				Pvc:           pvc,
+				Backend:       "kopia-fs",
+				Source:        pvc + "-backup@" + namespace + ":/data",
 			},
 			expiresAt: expiry,
 		}
@@ -87,11 +90,18 @@ func (c *CachedClient) CheckBackupExists(ctx context.Context, namespace, pvc str
 	result := c.inner.CheckBackupExists(ctx, namespace, pvc)
 
 	// Only cache successful checks (no errors)
-	if result.Error == "" {
+	if result.Error == "" && result.Authoritative {
 		c.mu.Lock()
 		c.items[key] = entry{result: result, expiresAt: time.Now().Add(c.ttl)}
 		c.mu.Unlock()
 	}
 
 	return result
+}
+
+func decisionForExists(exists bool) string {
+	if exists {
+		return backend.DecisionRestore
+	}
+	return backend.DecisionFresh
 }
