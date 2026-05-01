@@ -108,10 +108,10 @@ func TestRefresh_SkipsMalformedKeys(t *testing.T) {
 	c := New(&fakeBackend{}, time.Minute, discardLogger())
 
 	c.Refresh(map[string]bool{
-		"valid/key":      true,
-		"missing-slash":  true,
-		"/empty-ns":      true,
-		"empty-pvc/":     true,
+		"valid/key":     true,
+		"missing-slash": true,
+		"/empty-ns":     true,
+		"empty-pvc/":    true,
 	})
 
 	if got := len(c.items); got != 1 {

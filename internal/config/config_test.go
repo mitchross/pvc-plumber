@@ -266,10 +266,10 @@ func TestLoad_ReWarmInterval(t *testing.T) {
 	}()
 
 	tests := []struct {
-		name     string
-		envVar   string
-		wantErr  bool
-		wantInt  time.Duration
+		name    string
+		envVar  string
+		wantErr bool
+		wantInt time.Duration
 	}{
 		{"default when unset", "", false, 90 * time.Second},
 		{"explicit 60s", "60s", false, 60 * time.Second},

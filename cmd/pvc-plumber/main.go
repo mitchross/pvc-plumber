@@ -156,7 +156,7 @@ func main() {
 }
 
 // runCacheReWarmLoop periodically re-runs kopia ListAllSources and
-// refreshes the cache. Returns when ctx is cancelled (shutdown). Each
+// refreshes the cache. Returns when ctx is canceled (shutdown). Each
 // tick is bounded by a per-call timeout so a hung kopia subprocess
 // can't pin the goroutine across multiple intervals.
 func runCacheReWarmLoop(
