@@ -9,11 +9,12 @@ import (
 
 type Config struct {
 	// Common settings
-	BackendType string
-	HTTPTimeout time.Duration
-	CacheTTL    time.Duration
-	Port        string
-	LogLevel    string
+	BackendType    string
+	HTTPTimeout    time.Duration
+	CacheTTL       time.Duration
+	ReWarmInterval time.Duration // 0 disables the periodic re-warm loop
+	Port           string
+	LogLevel       string
 
 	// S3 backend settings
 	S3Endpoint  string
@@ -55,6 +56,18 @@ func Load() (*Config, error) {
 		cacheTTL = duration
 	}
 
+	reWarmInterval := 90 * time.Second
+	if intervalStr := os.Getenv("RE_WARM_INTERVAL"); intervalStr != "" {
+		duration, err := time.ParseDuration(intervalStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid RE_WARM_INTERVAL: %w", err)
+		}
+		if duration < 0 {
+			return nil, fmt.Errorf("RE_WARM_INTERVAL must be >= 0, got %s", intervalStr)
+		}
+		reWarmInterval = duration
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -66,11 +79,12 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		BackendType: backendType,
-		HTTPTimeout: httpTimeout,
-		CacheTTL:    cacheTTL,
-		Port:        port,
-		LogLevel:    logLevel,
+		BackendType:    backendType,
+		HTTPTimeout:    httpTimeout,
+		CacheTTL:       cacheTTL,
+		ReWarmInterval: reWarmInterval,
+		Port:           port,
+		LogLevel:       logLevel,
 	}
 
 	// Backend-specific validation

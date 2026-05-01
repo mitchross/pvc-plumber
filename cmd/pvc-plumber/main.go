@@ -49,7 +49,8 @@ func main() {
 		"backend", cfg.BackendType,
 		"port", cfg.Port,
 		"log_level", cfg.LogLevel,
-		"cache_ttl", cfg.CacheTTL)
+		"cache_ttl", cfg.CacheTTL,
+		"re_warm_interval", cfg.ReWarmInterval)
 
 	// Create backend based on configuration
 	var backendClient handler.BackendClient
@@ -80,9 +81,11 @@ func main() {
 	cachedBackend := cache.New(backendClient, cfg.CacheTTL, logger)
 
 	// Pre-warm cache for kopia backend
+	var kopiaClient *kopia.Client
 	if cfg.BackendType == "kopia-fs" {
-		if kopiaClient, ok := backendClient.(*kopia.Client); ok {
-			sources, err := kopiaClient.ListAllSources(context.Background())
+		if kc, ok := backendClient.(*kopia.Client); ok {
+			kopiaClient = kc
+			sources, err := kc.ListAllSources(context.Background())
 			if err != nil {
 				logger.Warn("cache pre-warm failed, will populate on demand", "error", err)
 			} else {
@@ -122,12 +125,23 @@ func main() {
 		}
 	}()
 
+	// Periodic cache re-warm (kopia backend only). Each tick re-runs
+	// `kopia snapshot list --all` and rebuilds the cache so deleted
+	// backups stop returning stale exists=true entries within one
+	// re-warm cycle instead of waiting for each entry's TTL to expire.
+	rwCtx, rwCancel := context.WithCancel(context.Background())
+	defer rwCancel()
+	if kopiaClient != nil && cfg.ReWarmInterval > 0 {
+		go runCacheReWarmLoop(rwCtx, kopiaClient, cachedBackend, cfg.ReWarmInterval, logger)
+	}
+
 	// Wait for interrupt signal for graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
 	logger.Info("shutting down server")
+	rwCancel()
 
 	// Graceful shutdown with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -139,4 +153,44 @@ func main() {
 	}
 
 	logger.Info("server stopped")
+}
+
+// runCacheReWarmLoop periodically re-runs kopia ListAllSources and
+// refreshes the cache. Returns when ctx is cancelled (shutdown). Each
+// tick is bounded by a per-call timeout so a hung kopia subprocess
+// can't pin the goroutine across multiple intervals.
+func runCacheReWarmLoop(
+	ctx context.Context,
+	kopiaClient *kopia.Client,
+	cachedBackend *cache.CachedClient,
+	interval time.Duration,
+	logger *slog.Logger,
+) {
+	logger.Info("cache re-warm loop starting", "interval", interval)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Bound each call to roughly one interval so a stuck `kopia snapshot
+	// list --all` can't keep the loop from progressing.
+	callTimeout := interval
+	if callTimeout > 60*time.Second {
+		callTimeout = 60 * time.Second
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("cache re-warm loop stopping")
+			return
+		case <-ticker.C:
+			callCtx, cancel := context.WithTimeout(ctx, callTimeout)
+			sources, err := kopiaClient.ListAllSources(callCtx)
+			cancel()
+			if err != nil {
+				logger.Warn("cache re-warm failed; keeping previous entries", "error", err)
+				continue
+			}
+			cachedBackend.Refresh(sources)
+		}
+	}
 }

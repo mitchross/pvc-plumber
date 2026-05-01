@@ -246,6 +246,70 @@ func TestLoad_S3Backend(t *testing.T) {
 	}
 }
 
+func TestLoad_ReWarmInterval(t *testing.T) {
+	origVars := map[string]string{
+		"BACKEND_TYPE":     os.Getenv("BACKEND_TYPE"),
+		"S3_ENDPOINT":      os.Getenv("S3_ENDPOINT"),
+		"S3_BUCKET":        os.Getenv("S3_BUCKET"),
+		"S3_ACCESS_KEY":    os.Getenv("S3_ACCESS_KEY"),
+		"S3_SECRET_KEY":    os.Getenv("S3_SECRET_KEY"),
+		"RE_WARM_INTERVAL": os.Getenv("RE_WARM_INTERVAL"),
+	}
+	defer func() {
+		for k, v := range origVars {
+			if v == "" {
+				_ = os.Unsetenv(k)
+			} else {
+				_ = os.Setenv(k, v)
+			}
+		}
+	}()
+
+	tests := []struct {
+		name     string
+		envVar   string
+		wantErr  bool
+		wantInt  time.Duration
+	}{
+		{"default when unset", "", false, 90 * time.Second},
+		{"explicit 60s", "60s", false, 60 * time.Second},
+		{"explicit 2m", "2m", false, 2 * time.Minute},
+		{"zero disables", "0s", false, 0},
+		{"negative rejected", "-30s", true, 0},
+		{"unparseable rejected", "garbage", true, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k := range origVars {
+				_ = os.Unsetenv(k)
+			}
+			_ = os.Setenv("BACKEND_TYPE", "s3")
+			_ = os.Setenv("S3_ENDPOINT", "localhost:9000")
+			_ = os.Setenv("S3_BUCKET", "bucket")
+			_ = os.Setenv("S3_ACCESS_KEY", "k")
+			_ = os.Setenv("S3_SECRET_KEY", "s")
+			if tt.envVar != "" {
+				_ = os.Setenv("RE_WARM_INTERVAL", tt.envVar)
+			}
+
+			cfg, err := Load()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (cfg=%+v)", cfg)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.ReWarmInterval != tt.wantInt {
+				t.Errorf("ReWarmInterval = %v, want %v", cfg.ReWarmInterval, tt.wantInt)
+			}
+		})
+	}
+}
+
 func TestLoad_KopiaBackend(t *testing.T) {
 	// Save original env vars
 	origVars := map[string]string{
