@@ -4,9 +4,11 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mitchross/pvc-plumber/internal/backend"
+	"golang.org/x/sync/singleflight"
 )
 
 // BackendClient matches handler.BackendClient for wrapping.
@@ -26,6 +28,14 @@ type CachedClient struct {
 	logger *slog.Logger
 	mu     sync.RWMutex
 	items  map[string]entry
+
+	// sf deduplicates concurrent cache-miss lookups for the same key.
+	// Kyverno issues 3 admission calls per PVC (one mutate, two validate),
+	// and during catalog re-warm or pod startup these can race past the
+	// cache simultaneously. singleflight ensures only one goroutine calls
+	// the upstream Kopia catalog; the others wait for and share the result.
+	sf            singleflight.Group
+	dedupedCalls  atomic.Int64
 }
 
 // New creates a cached wrapper around a backend client.
@@ -36,6 +46,13 @@ func New(inner BackendClient, ttl time.Duration, logger *slog.Logger) *CachedCli
 		logger: logger,
 		items:  make(map[string]entry),
 	}
+}
+
+// DedupedCalls returns the number of /exists lookups that were served by a
+// concurrent leader via singleflight (i.e. did not invoke the underlying
+// backend themselves). Exposed for Prometheus.
+func (c *CachedClient) DedupedCalls() int64 {
+	return c.dedupedCalls.Load()
 }
 
 // PreWarm populates the cache with known backup sources.
@@ -118,17 +135,31 @@ func (c *CachedClient) CheckBackupExists(ctx context.Context, namespace, pvc str
 	}
 	c.mu.RUnlock()
 
-	// Cache miss — call backend
-	result := c.inner.CheckBackupExists(ctx, namespace, pvc)
+	// Cache miss — collapse concurrent identical lookups via singleflight.
+	// Only one goroutine per key actually calls the backend; the rest wait
+	// for and share its result. The `executed` flag lets us tell leader
+	// (ran the closure) from follower (got the shared result) without
+	// relying on DoChan.
+	var executed bool
+	v, _, _ := c.sf.Do(key, func() (any, error) {
+		executed = true
+		result := c.inner.CheckBackupExists(ctx, namespace, pvc)
 
-	// Only cache successful checks (no errors)
-	if result.Error == "" && result.Authoritative {
-		c.mu.Lock()
-		c.items[key] = entry{result: result, expiresAt: time.Now().Add(c.ttl)}
-		c.mu.Unlock()
+		// Only cache successful checks (no errors)
+		if result.Error == "" && result.Authoritative {
+			c.mu.Lock()
+			c.items[key] = entry{result: result, expiresAt: time.Now().Add(c.ttl)}
+			c.mu.Unlock()
+		}
+		return result, nil
+	})
+
+	if !executed {
+		c.dedupedCalls.Add(1)
+		c.logger.Debug("singleflight dedup", "namespace", namespace, "pvc", pvc)
 	}
 
-	return result
+	return v.(backend.CheckResult)
 }
 
 func decisionForExists(exists bool) string {

@@ -182,6 +182,9 @@ pvc_plumber_requests_errors_total 0
 pvc_plumber_backup_check_total{backend="kopia-fs",decision="restore"} 17
 pvc_plumber_backup_check_total{backend="kopia-fs",decision="fresh"} 3
 pvc_plumber_backup_check_total{backend="kopia-fs",decision="unknown"} 0
+# HELP pvcplumber_exists_singleflight_dedup_total Total number of /exists requests whose result was shared from an in-flight identical lookup (singleflight follower)
+# TYPE pvcplumber_exists_singleflight_dedup_total counter
+pvcplumber_exists_singleflight_dedup_total 0
 ```
 
 ## Configuration
@@ -514,7 +517,7 @@ The service is composed of four main components:
 2. **Backend Interface** (`internal/backend`): Defines the common tri-state `CheckResult` type
 3. **S3 Client** (`internal/s3`): Uses minio-go for authenticated S3 requests
 4. **Kopia Client** (`internal/kopia`): Wraps the kopia CLI for snapshot queries
-5. **Cache Layer** (`internal/cache`): In-memory TTL cache with startup pre-warm. Pre-warm runs `kopia snapshot list --all --json` once to populate all known sources
+5. **Cache Layer** (`internal/cache`): In-memory TTL cache with startup pre-warm. Pre-warm runs `kopia snapshot list --all --json` once to populate all known sources. Cache misses are wrapped in a singleflight group (keyed by `namespace/pvc`) so concurrent identical lookups share one underlying backend query rather than each spawning a separate Kopia call
 6. **HTTP Handlers** (`internal/handler`): Exposes REST API endpoints
 
 ### Backend Details
@@ -535,7 +538,7 @@ The service is composed of four main components:
 
 ### Prerequisites
 
-- Go 1.24 or later
+- Go 1.25 or later
 - Docker (optional, for building images)
 - Make (optional, for using Makefile targets)
 - kopia binary (for testing kopia-fs backend)

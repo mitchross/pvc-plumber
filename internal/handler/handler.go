@@ -24,6 +24,14 @@ type HealthChecker interface {
 	HealthCheck(ctx context.Context) error
 }
 
+// DedupCounter is an optional interface a wrapped backend can implement to
+// report how many /exists lookups were collapsed by singleflight (i.e.
+// served from a concurrent leader's result rather than a fresh upstream
+// call). Exposed via the pvcplumber_exists_singleflight_dedup_total metric.
+type DedupCounter interface {
+	DedupedCalls() int64
+}
+
 type Handler struct {
 	backend        BackendClient
 	healthChecker  HealthChecker
@@ -172,6 +180,11 @@ func (h *Handler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE pvc_plumber_backup_check_total counter\n")
 	for _, sample := range h.backupCheckSamples() {
 		_, _ = fmt.Fprintf(w, "pvc_plumber_backup_check_total{backend=%q,decision=%q} %d\n", sample.backend, sample.decision, sample.value)
+	}
+	if dc, ok := h.backend.(DedupCounter); ok {
+		_, _ = fmt.Fprintf(w, "# HELP pvcplumber_exists_singleflight_dedup_total Total number of /exists lookups collapsed by singleflight (served from a concurrent leader's result)\n")
+		_, _ = fmt.Fprintf(w, "# TYPE pvcplumber_exists_singleflight_dedup_total counter\n")
+		_, _ = fmt.Fprintf(w, "pvcplumber_exists_singleflight_dedup_total %d\n", dc.DedupedCalls())
 	}
 }
 
