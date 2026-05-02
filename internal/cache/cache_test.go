@@ -12,6 +12,11 @@ import (
 	"github.com/mitchross/pvc-plumber/internal/backend"
 )
 
+// testKey is a canonical "<namespace>/<pvc>" cache key reused across the
+// cache tests. Centralized so goconst stops shouting and so renaming the
+// fixture is a one-line change.
+const testKey = "app-a/data"
+
 // fakeBackend is a hand-rolled stub used so the cache tests don't have
 // to import handler or set up a real backend. It records call counts
 // and returns a configured CheckResult.
@@ -36,7 +41,7 @@ func TestPreWarm_AddsEntriesWithoutEvicting(t *testing.T) {
 	c := New(&fakeBackend{}, time.Minute, discardLogger())
 
 	c.PreWarm(map[string]bool{
-		"app-a/data": true,
+		testKey:      true,
 		"app-b/data": false,
 	})
 
@@ -59,7 +64,7 @@ func TestRefresh_ReplacesItemsAndEvictsMissing(t *testing.T) {
 	c := New(&fakeBackend{}, time.Minute, discardLogger())
 
 	c.PreWarm(map[string]bool{
-		"app-a/data": true,
+		testKey:      true,
 		"app-b/data": true,
 	})
 	if got := len(c.items); got != 2 {
@@ -68,7 +73,7 @@ func TestRefresh_ReplacesItemsAndEvictsMissing(t *testing.T) {
 
 	// Refresh with a new set — app-a kept, app-b dropped, app-c added.
 	c.Refresh(map[string]bool{
-		"app-a/data": true,
+		testKey:      true,
 		"app-c/data": false,
 	})
 
@@ -81,7 +86,7 @@ func TestRefresh_ReplacesItemsAndEvictsMissing(t *testing.T) {
 	if _, ok := c.items["app-c/data"]; !ok {
 		t.Errorf("app-c/data should have been added, missing")
 	}
-	if e, ok := c.items["app-a/data"]; !ok {
+	if e, ok := c.items[testKey]; !ok {
 		t.Errorf("app-a/data should still be present, missing")
 	} else if !e.result.Authoritative {
 		t.Errorf("kept entry lost authoritative bit")
@@ -91,14 +96,14 @@ func TestRefresh_ReplacesItemsAndEvictsMissing(t *testing.T) {
 func TestRefresh_ExtendsExpiryOfKeptEntries(t *testing.T) {
 	c := New(&fakeBackend{}, time.Minute, discardLogger())
 
-	c.PreWarm(map[string]bool{"app-a/data": true})
-	originalExpiry := c.items["app-a/data"].expiresAt
+	c.PreWarm(map[string]bool{testKey: true})
+	originalExpiry := c.items[testKey].expiresAt
 
 	// Sleep long enough that the new expiry time is observably later.
 	time.Sleep(2 * time.Millisecond)
 
-	c.Refresh(map[string]bool{"app-a/data": true})
-	newExpiry := c.items["app-a/data"].expiresAt
+	c.Refresh(map[string]bool{testKey: true})
+	newExpiry := c.items[testKey].expiresAt
 
 	if !newExpiry.After(originalExpiry) {
 		t.Errorf("Refresh should have extended expiry: original=%s new=%s", originalExpiry, newExpiry)
@@ -127,7 +132,7 @@ func TestCheckBackupExists_ServesFromRefreshedCache(t *testing.T) {
 	bk := &fakeBackend{result: backend.CheckResult{Decision: backend.DecisionFresh, Authoritative: true}}
 	c := New(bk, time.Minute, discardLogger())
 
-	c.Refresh(map[string]bool{"app-a/data": true})
+	c.Refresh(map[string]bool{testKey: true})
 
 	// Cache hit — backend should NOT be called.
 	res := c.CheckBackupExists(context.Background(), "app-a", "data")
@@ -165,7 +170,7 @@ func TestCheckBackupExists_SingleflightDedupsConcurrentLookups(t *testing.T) {
 			Exists:        true,
 			Decision:      backend.DecisionRestore,
 			Authoritative: true,
-			Backend:       "kopia-fs",
+			Backend:       backend.TypeKopiaFS,
 		},
 	}
 	c := New(bk, time.Minute, discardLogger())
@@ -209,7 +214,7 @@ func TestCheckBackupExists_FallsThroughOnEvictedEntry(t *testing.T) {
 	}}
 	c := New(bk, time.Minute, discardLogger())
 
-	c.Refresh(map[string]bool{"app-a/data": true})
+	c.Refresh(map[string]bool{testKey: true})
 	c.Refresh(map[string]bool{}) // evict everything
 
 	// Cache miss after eviction — backend MUST be called.

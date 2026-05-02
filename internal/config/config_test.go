@@ -4,20 +4,48 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/mitchross/pvc-plumber/internal/backend"
+)
+
+// Test fixture constants. Centralizing these stops goconst from complaining
+// about repeated literals across the table-driven tests, and makes it a
+// one-line change to rename a fixture string.
+const (
+	// Env var names exercised by Load().
+	envBackendType   = "BACKEND_TYPE"
+	envS3Endpoint    = "S3_ENDPOINT"
+	envS3Bucket      = "S3_BUCKET"
+	envS3AccessKey   = "S3_ACCESS_KEY"
+	envS3SecretKey   = "S3_SECRET_KEY"
+	envS3Secure      = "S3_SECURE"
+	envHTTPTimeout   = "HTTP_TIMEOUT"
+	envPort          = "PORT"
+	envLogLevel      = "LOG_LEVEL"
+	envKopiaRepoPath = "KOPIA_REPOSITORY_PATH"
+	envKopiaPassword = "KOPIA_PASSWORD"
+
+	// Repeated test values across multiple table rows.
+	testEndpoint = "localhost:9000"
+	testBucket   = "test-bucket"
+	testAccess   = "accesskey"
+	testSecret   = "secretkey"
+	testLogDebug = "debug"
+	testLogInfo  = "info"
 )
 
 func TestLoad_S3Backend(t *testing.T) {
 	// Save original env vars
 	origVars := map[string]string{
-		"BACKEND_TYPE":  os.Getenv("BACKEND_TYPE"),
-		"S3_ENDPOINT":   os.Getenv("S3_ENDPOINT"),
-		"S3_BUCKET":     os.Getenv("S3_BUCKET"),
-		"S3_ACCESS_KEY": os.Getenv("S3_ACCESS_KEY"),
-		"S3_SECRET_KEY": os.Getenv("S3_SECRET_KEY"),
-		"S3_SECURE":     os.Getenv("S3_SECURE"),
-		"HTTP_TIMEOUT":  os.Getenv("HTTP_TIMEOUT"),
-		"PORT":          os.Getenv("PORT"),
-		"LOG_LEVEL":     os.Getenv("LOG_LEVEL"),
+		envBackendType: os.Getenv(envBackendType),
+		envS3Endpoint:  os.Getenv(envS3Endpoint),
+		envS3Bucket:    os.Getenv(envS3Bucket),
+		envS3AccessKey: os.Getenv(envS3AccessKey),
+		envS3SecretKey: os.Getenv(envS3SecretKey),
+		envS3Secure:    os.Getenv(envS3Secure),
+		envHTTPTimeout: os.Getenv(envHTTPTimeout),
+		envPort:        os.Getenv(envPort),
+		envLogLevel:    os.Getenv(envLogLevel),
 	}
 
 	// Restore env vars after test
@@ -48,134 +76,134 @@ func TestLoad_S3Backend(t *testing.T) {
 		{
 			name: "valid s3 config with all env vars",
 			envVars: map[string]string{
-				"BACKEND_TYPE":  "s3",
-				"S3_ENDPOINT":   "localhost:9000",
-				"S3_BUCKET":     "test-bucket",
-				"S3_ACCESS_KEY": "myaccesskey",
-				"S3_SECRET_KEY": "mysecretkey",
-				"S3_SECURE":     "true",
-				"HTTP_TIMEOUT":  "5s",
-				"PORT":          "9090",
-				"LOG_LEVEL":     "debug",
+				envBackendType: "s3",
+				envS3Endpoint:  testEndpoint,
+				envS3Bucket:    testBucket,
+				envS3AccessKey: "myaccesskey",
+				envS3SecretKey: "mysecretkey",
+				envS3Secure:    "true",
+				envHTTPTimeout: "5s",
+				envPort:        "9090",
+				envLogLevel:    testLogDebug,
 			},
 			wantErr:      false,
 			wantBackend:  "s3",
-			wantEndpoint: "localhost:9000",
-			wantBucket:   "test-bucket",
+			wantEndpoint: testEndpoint,
+			wantBucket:   testBucket,
 			wantAccess:   "myaccesskey",
 			wantSecret:   "mysecretkey",
 			wantSecure:   true,
 			wantTimeout:  5 * time.Second,
 			wantPort:     "9090",
-			wantLogLevel: "debug",
+			wantLogLevel: testLogDebug,
 		},
 		{
 			name: "valid s3 config with defaults (no BACKEND_TYPE)",
 			envVars: map[string]string{
-				"S3_ENDPOINT":   "minio:9000",
-				"S3_BUCKET":     "volsync-backup",
-				"S3_ACCESS_KEY": "accesskey",
-				"S3_SECRET_KEY": "secretkey",
+				envS3Endpoint:  "minio:9000",
+				envS3Bucket:    "volsync-backup",
+				envS3AccessKey: testAccess,
+				envS3SecretKey: testSecret,
 			},
 			wantErr:      false,
 			wantBackend:  "s3",
 			wantEndpoint: "minio:9000",
 			wantBucket:   "volsync-backup",
-			wantAccess:   "accesskey",
-			wantSecret:   "secretkey",
+			wantAccess:   testAccess,
+			wantSecret:   testSecret,
 			wantSecure:   false,
 			wantTimeout:  3 * time.Second,
 			wantPort:     "8080",
-			wantLogLevel: "info",
+			wantLogLevel: testLogInfo,
 		},
 		{
 			name: "missing S3_ENDPOINT",
 			envVars: map[string]string{
-				"BACKEND_TYPE":  "s3",
-				"S3_BUCKET":     "test-bucket",
-				"S3_ACCESS_KEY": "accesskey",
-				"S3_SECRET_KEY": "secretkey",
+				envBackendType: "s3",
+				envS3Bucket:    testBucket,
+				envS3AccessKey: testAccess,
+				envS3SecretKey: testSecret,
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing S3_BUCKET",
 			envVars: map[string]string{
-				"BACKEND_TYPE":  "s3",
-				"S3_ENDPOINT":   "localhost:9000",
-				"S3_ACCESS_KEY": "accesskey",
-				"S3_SECRET_KEY": "secretkey",
+				envBackendType: "s3",
+				envS3Endpoint:  testEndpoint,
+				envS3AccessKey: testAccess,
+				envS3SecretKey: testSecret,
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing S3_ACCESS_KEY",
 			envVars: map[string]string{
-				"BACKEND_TYPE":  "s3",
-				"S3_ENDPOINT":   "localhost:9000",
-				"S3_BUCKET":     "test-bucket",
-				"S3_SECRET_KEY": "secretkey",
+				envBackendType: "s3",
+				envS3Endpoint:  testEndpoint,
+				envS3Bucket:    testBucket,
+				envS3SecretKey: testSecret,
 			},
 			wantErr: true,
 		},
 		{
 			name: "missing S3_SECRET_KEY",
 			envVars: map[string]string{
-				"BACKEND_TYPE":  "s3",
-				"S3_ENDPOINT":   "localhost:9000",
-				"S3_BUCKET":     "test-bucket",
-				"S3_ACCESS_KEY": "accesskey",
+				envBackendType: "s3",
+				envS3Endpoint:  testEndpoint,
+				envS3Bucket:    testBucket,
+				envS3AccessKey: testAccess,
 			},
 			wantErr: true,
 		},
 		{
 			name: "invalid HTTP_TIMEOUT",
 			envVars: map[string]string{
-				"BACKEND_TYPE":  "s3",
-				"S3_ENDPOINT":   "localhost:9000",
-				"S3_BUCKET":     "test-bucket",
-				"S3_ACCESS_KEY": "accesskey",
-				"S3_SECRET_KEY": "secretkey",
-				"HTTP_TIMEOUT":  "invalid",
+				envBackendType: "s3",
+				envS3Endpoint:  testEndpoint,
+				envS3Bucket:    testBucket,
+				envS3AccessKey: testAccess,
+				envS3SecretKey: testSecret,
+				envHTTPTimeout: "invalid",
 			},
 			wantErr: true,
 		},
 		{
 			name: "invalid S3_SECURE",
 			envVars: map[string]string{
-				"BACKEND_TYPE":  "s3",
-				"S3_ENDPOINT":   "localhost:9000",
-				"S3_BUCKET":     "test-bucket",
-				"S3_ACCESS_KEY": "accesskey",
-				"S3_SECRET_KEY": "secretkey",
-				"S3_SECURE":     "notabool",
+				envBackendType: "s3",
+				envS3Endpoint:  testEndpoint,
+				envS3Bucket:    testBucket,
+				envS3AccessKey: testAccess,
+				envS3SecretKey: testSecret,
+				envS3Secure:    "notabool",
 			},
 			wantErr: true,
 		},
 		{
 			name: "timeout with milliseconds",
 			envVars: map[string]string{
-				"S3_ENDPOINT":   "localhost:9000",
-				"S3_BUCKET":     "test-bucket",
-				"S3_ACCESS_KEY": "accesskey",
-				"S3_SECRET_KEY": "secretkey",
-				"HTTP_TIMEOUT":  "500ms",
+				envS3Endpoint:  testEndpoint,
+				envS3Bucket:    testBucket,
+				envS3AccessKey: testAccess,
+				envS3SecretKey: testSecret,
+				envHTTPTimeout: "500ms",
 			},
 			wantErr:      false,
 			wantBackend:  "s3",
-			wantEndpoint: "localhost:9000",
-			wantBucket:   "test-bucket",
-			wantAccess:   "accesskey",
-			wantSecret:   "secretkey",
+			wantEndpoint: testEndpoint,
+			wantBucket:   testBucket,
+			wantAccess:   testAccess,
+			wantSecret:   testSecret,
 			wantSecure:   false,
 			wantTimeout:  500 * time.Millisecond,
 			wantPort:     "8080",
-			wantLogLevel: "info",
+			wantLogLevel: testLogInfo,
 		},
 		{
 			name: "invalid backend type",
 			envVars: map[string]string{
-				"BACKEND_TYPE": "invalid",
+				envBackendType: "invalid",
 			},
 			wantErr: true,
 		},
@@ -248,11 +276,11 @@ func TestLoad_S3Backend(t *testing.T) {
 
 func TestLoad_ReWarmInterval(t *testing.T) {
 	origVars := map[string]string{
-		"BACKEND_TYPE":     os.Getenv("BACKEND_TYPE"),
-		"S3_ENDPOINT":      os.Getenv("S3_ENDPOINT"),
-		"S3_BUCKET":        os.Getenv("S3_BUCKET"),
-		"S3_ACCESS_KEY":    os.Getenv("S3_ACCESS_KEY"),
-		"S3_SECRET_KEY":    os.Getenv("S3_SECRET_KEY"),
+		envBackendType:     os.Getenv(envBackendType),
+		envS3Endpoint:      os.Getenv(envS3Endpoint),
+		envS3Bucket:        os.Getenv(envS3Bucket),
+		envS3AccessKey:     os.Getenv(envS3AccessKey),
+		envS3SecretKey:     os.Getenv(envS3SecretKey),
 		"RE_WARM_INTERVAL": os.Getenv("RE_WARM_INTERVAL"),
 	}
 	defer func() {
@@ -284,11 +312,11 @@ func TestLoad_ReWarmInterval(t *testing.T) {
 			for k := range origVars {
 				_ = os.Unsetenv(k)
 			}
-			_ = os.Setenv("BACKEND_TYPE", "s3")
-			_ = os.Setenv("S3_ENDPOINT", "localhost:9000")
-			_ = os.Setenv("S3_BUCKET", "bucket")
-			_ = os.Setenv("S3_ACCESS_KEY", "k")
-			_ = os.Setenv("S3_SECRET_KEY", "s")
+			_ = os.Setenv(envBackendType, "s3")
+			_ = os.Setenv(envS3Endpoint, testEndpoint)
+			_ = os.Setenv(envS3Bucket, "bucket")
+			_ = os.Setenv(envS3AccessKey, "k")
+			_ = os.Setenv(envS3SecretKey, "s")
 			if tt.envVar != "" {
 				_ = os.Setenv("RE_WARM_INTERVAL", tt.envVar)
 			}
@@ -313,12 +341,12 @@ func TestLoad_ReWarmInterval(t *testing.T) {
 func TestLoad_KopiaBackend(t *testing.T) {
 	// Save original env vars
 	origVars := map[string]string{
-		"BACKEND_TYPE":          os.Getenv("BACKEND_TYPE"),
-		"KOPIA_REPOSITORY_PATH": os.Getenv("KOPIA_REPOSITORY_PATH"),
-		"KOPIA_PASSWORD":        os.Getenv("KOPIA_PASSWORD"),
-		"HTTP_TIMEOUT":          os.Getenv("HTTP_TIMEOUT"),
-		"PORT":                  os.Getenv("PORT"),
-		"LOG_LEVEL":             os.Getenv("LOG_LEVEL"),
+		envBackendType:   os.Getenv(envBackendType),
+		envKopiaRepoPath: os.Getenv(envKopiaRepoPath),
+		envKopiaPassword: os.Getenv(envKopiaPassword),
+		envHTTPTimeout:   os.Getenv(envHTTPTimeout),
+		envPort:          os.Getenv(envPort),
+		envLogLevel:      os.Getenv(envLogLevel),
 	}
 
 	// Restore env vars after test
@@ -348,24 +376,24 @@ func TestLoad_KopiaBackend(t *testing.T) {
 		{
 			name: "valid kopia-fs config",
 			envVars: map[string]string{
-				"BACKEND_TYPE":          "kopia-fs",
-				"KOPIA_REPOSITORY_PATH": tmpDir,
-				"KOPIA_PASSWORD":        "testpassword",
-				"HTTP_TIMEOUT":          "5s",
-				"PORT":                  "9090",
-				"LOG_LEVEL":             "debug",
+				envBackendType:   backend.TypeKopiaFS,
+				envKopiaRepoPath: tmpDir,
+				envKopiaPassword: "testpassword",
+				envHTTPTimeout:   "5s",
+				envPort:          "9090",
+				envLogLevel:      testLogDebug,
 			},
 			wantErr:       false,
-			wantBackend:   "kopia-fs",
+			wantBackend:   backend.TypeKopiaFS,
 			wantKopiaPath: tmpDir,
 			wantTimeout:   5 * time.Second,
 			wantPort:      "9090",
-			wantLogLevel:  "debug",
+			wantLogLevel:  testLogDebug,
 		},
 		{
 			name: "kopia-fs with default path that doesn't exist",
 			envVars: map[string]string{
-				"BACKEND_TYPE": "kopia-fs",
+				envBackendType: backend.TypeKopiaFS,
 				// KOPIA_REPOSITORY_PATH not set, defaults to /repository which likely doesn't exist
 			},
 			wantErr: true,
@@ -373,17 +401,17 @@ func TestLoad_KopiaBackend(t *testing.T) {
 		{
 			name: "kopia-fs with non-existent path",
 			envVars: map[string]string{
-				"BACKEND_TYPE":          "kopia-fs",
-				"KOPIA_REPOSITORY_PATH": "/nonexistent/path/to/repo",
-				"KOPIA_PASSWORD":        "testpassword",
+				envBackendType:   backend.TypeKopiaFS,
+				envKopiaRepoPath: "/nonexistent/path/to/repo",
+				envKopiaPassword: "testpassword",
 			},
 			wantErr: true,
 		},
 		{
 			name: "kopia-fs missing password",
 			envVars: map[string]string{
-				"BACKEND_TYPE":          "kopia-fs",
-				"KOPIA_REPOSITORY_PATH": tmpDir,
+				envBackendType:   backend.TypeKopiaFS,
+				envKopiaRepoPath: tmpDir,
 			},
 			wantErr: true,
 		},

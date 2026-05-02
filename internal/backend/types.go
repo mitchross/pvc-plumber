@@ -6,6 +6,13 @@ const (
 	DecisionUnknown = "unknown"
 )
 
+// Backend type identifiers used in CheckResult.Backend and as the value of
+// the BACKEND_TYPE env var that selects the runtime backend implementation.
+const (
+	TypeS3      = "s3"
+	TypeKopiaFS = "kopia-fs"
+)
+
 // CheckResult represents the result of a backup existence check.
 type CheckResult struct {
 	Exists        bool   `json:"exists"`

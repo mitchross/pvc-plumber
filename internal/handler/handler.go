@@ -14,6 +14,12 @@ import (
 	"github.com/mitchross/pvc-plumber/internal/backend"
 )
 
+// JSON keys used in /healthz and /readyz responses.
+const (
+	healthStatusKey = "status"
+	healthStatusOK  = "ok"
+)
+
 // BackendClient interface for dependency injection and testing
 type BackendClient interface {
 	CheckBackupExists(ctx context.Context, namespace, pvc string) backend.CheckResult
@@ -148,7 +154,7 @@ func (h *Handler) HandleExists(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) HandleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(map[string]string{healthStatusKey: healthStatusOK})
 }
 
 func (h *Handler) HandleReadyz(w http.ResponseWriter, r *http.Request) {
@@ -158,14 +164,14 @@ func (h *Handler) HandleReadyz(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]string{
-				"status": "not ready",
-				"error":  err.Error(),
+				healthStatusKey: "not ready",
+				"error":         err.Error(),
 			})
 			return
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	_ = json.NewEncoder(w).Encode(map[string]string{healthStatusKey: healthStatusOK})
 }
 
 func (h *Handler) HandleMetrics(w http.ResponseWriter, r *http.Request) {

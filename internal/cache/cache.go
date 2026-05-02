@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -34,8 +35,8 @@ type CachedClient struct {
 	// and during catalog re-warm or pod startup these can race past the
 	// cache simultaneously. singleflight ensures only one goroutine calls
 	// the upstream Kopia catalog; the others wait for and share the result.
-	sf            singleflight.Group
-	dedupedCalls  atomic.Int64
+	sf           singleflight.Group
+	dedupedCalls atomic.Int64
 }
 
 // New creates a cached wrapper around a backend client.
@@ -159,7 +160,20 @@ func (c *CachedClient) CheckBackupExists(ctx context.Context, namespace, pvc str
 		c.logger.Debug("singleflight dedup", "namespace", namespace, "pvc", pvc)
 	}
 
-	return v.(backend.CheckResult)
+	// The closure above always returns a backend.CheckResult, so the
+	// assertion is an invariant. errcheck wants the comma-ok form anyway.
+	result, ok := v.(backend.CheckResult)
+	if !ok {
+		c.logger.Error("singleflight returned unexpected type",
+			"namespace", namespace, "pvc", pvc, "type", fmt.Sprintf("%T", v))
+		return backend.CheckResult{
+			Exists:        false,
+			Authoritative: false,
+			Error:         "internal cache type-assertion failure",
+			Decision:      backend.DecisionUnknown,
+		}
+	}
+	return result
 }
 
 func decisionForExists(exists bool) string {

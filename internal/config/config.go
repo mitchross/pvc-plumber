@@ -5,6 +5,15 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/mitchross/pvc-plumber/internal/backend"
+)
+
+// Default values for log level and HTTP port. Centralized so the strings
+// don't drift between Load() and tests.
+const (
+	defaultLogLevel = "info"
+	defaultPort     = "8080"
 )
 
 type Config struct {
@@ -32,10 +41,11 @@ func Load() (*Config, error) {
 	// Common settings
 	backendType := os.Getenv("BACKEND_TYPE")
 	if backendType == "" {
-		backendType = "s3"
+		backendType = backend.TypeS3
 	}
-	if backendType != "s3" && backendType != "kopia-fs" {
-		return nil, fmt.Errorf("invalid BACKEND_TYPE: %s (must be 's3' or 'kopia-fs')", backendType)
+	if backendType != backend.TypeS3 && backendType != backend.TypeKopiaFS {
+		return nil, fmt.Errorf("invalid BACKEND_TYPE: %s (must be %q or %q)",
+			backendType, backend.TypeS3, backend.TypeKopiaFS)
 	}
 
 	httpTimeout := 3 * time.Second
@@ -70,12 +80,12 @@ func Load() (*Config, error) {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = defaultPort
 	}
 
 	logLevel := os.Getenv("LOG_LEVEL")
 	if logLevel == "" {
-		logLevel = "info"
+		logLevel = defaultLogLevel
 	}
 
 	cfg := &Config{
@@ -89,11 +99,11 @@ func Load() (*Config, error) {
 
 	// Backend-specific validation
 	switch backendType {
-	case "s3":
+	case backend.TypeS3:
 		if err := loadS3Config(cfg); err != nil {
 			return nil, err
 		}
-	case "kopia-fs":
+	case backend.TypeKopiaFS:
 		if err := loadKopiaConfig(cfg); err != nil {
 			return nil, err
 		}

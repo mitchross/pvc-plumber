@@ -92,7 +92,7 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 			Authoritative: false,
 			Namespace:     namespace,
 			Pvc:           pvc,
-			Backend:       "kopia-fs",
+			Backend:       backend.TypeKopiaFS,
 			Source:        source,
 			Error:         fmt.Sprintf("failed to list snapshots: %v", err),
 		}
@@ -108,7 +108,7 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 			Authoritative: false,
 			Namespace:     namespace,
 			Pvc:           pvc,
-			Backend:       "kopia-fs",
+			Backend:       backend.TypeKopiaFS,
 			Source:        source,
 			Error:         fmt.Sprintf("failed to parse kopia output: %v", err),
 		}
@@ -127,7 +127,7 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 		Authoritative: true,
 		Namespace:     namespace,
 		Pvc:           pvc,
-		Backend:       "kopia-fs",
+		Backend:       backend.TypeKopiaFS,
 		Source:        source,
 	}
 }

@@ -14,6 +14,13 @@ import (
 	"github.com/mitchross/pvc-plumber/internal/backend"
 )
 
+// Test fixture constants. Centralized so goconst stops complaining about
+// repeated literals and so renames are one-line changes.
+const (
+	testNamespace = "test-ns"
+	testPVC       = "test-pvc"
+)
+
 // mockBackendClient implements BackendClient interface for testing
 type mockBackendClient struct {
 	result backend.CheckResult
@@ -35,7 +42,7 @@ func (m *deadlineCapturingBackend) CheckBackupExists(ctx context.Context, namesp
 		Authoritative: true,
 		Namespace:     namespace,
 		Pvc:           pvc,
-		Backend:       "kopia-fs",
+		Backend:       backend.TypeKopiaFS,
 	}
 }
 
@@ -73,20 +80,20 @@ func TestHandleExists(t *testing.T) {
 		},
 		{
 			name: "no backup",
-			path: "/exists/test-ns/test-pvc",
+			path: "/exists/" + testNamespace + "/" + testPVC,
 			mockResult: backend.CheckResult{
 				Exists:        false,
 				Decision:      backend.DecisionFresh,
 				Authoritative: true,
-				Namespace:     "test-ns",
-				Pvc:           "test-pvc",
-				Backend:       "kopia-fs",
+				Namespace:     testNamespace,
+				Pvc:           testPVC,
+				Backend:       backend.TypeKopiaFS,
 			},
 			wantStatus:        http.StatusOK,
 			wantExists:        false,
 			wantDecision:      backend.DecisionFresh,
 			wantAuthoritative: true,
-			wantBackend:       "kopia-fs",
+			wantBackend:       backend.TypeKopiaFS,
 			wantError:         false,
 		},
 		{
@@ -133,7 +140,7 @@ func TestHandleExists(t *testing.T) {
 			mock := &mockBackendClient{result: tt.mockResult}
 			handler := New(mock, logger)
 
-			req := httptest.NewRequest("GET", tt.path, nil)
+			req := httptest.NewRequestWithContext(context.Background(), "GET", tt.path, nil)
 			w := httptest.NewRecorder()
 
 			handler.HandleExists(w, req)
@@ -174,7 +181,7 @@ func TestHandleHealthz(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	handler := New(nil, logger)
 
-	req := httptest.NewRequest("GET", "/healthz", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/healthz", nil)
 	w := httptest.NewRecorder()
 
 	handler.HandleHealthz(w, req)
@@ -199,7 +206,7 @@ func TestHandleExistsAppliesRequestTimeout(t *testing.T) {
 	handler := New(mock, logger)
 	handler.SetRequestTimeout(50 * time.Millisecond)
 
-	req := httptest.NewRequest("GET", "/exists/test-ns/test-pvc", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/exists/"+testNamespace+"/"+testPVC, nil)
 	w := httptest.NewRecorder()
 
 	handler.HandleExists(w, req)
@@ -213,7 +220,7 @@ func TestHandleReadyz(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	handler := New(nil, logger)
 
-	req := httptest.NewRequest("GET", "/readyz", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/readyz", nil)
 	w := httptest.NewRecorder()
 
 	handler.HandleReadyz(w, req)
@@ -236,7 +243,7 @@ func TestHandleMetrics(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	handler := New(nil, logger)
 
-	req := httptest.NewRequest("GET", "/metrics", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
 	w := httptest.NewRecorder()
 
 	handler.HandleMetrics(w, req)
@@ -275,19 +282,19 @@ func TestMetricsCounters(t *testing.T) {
 		Exists:        true,
 		Decision:      backend.DecisionRestore,
 		Authoritative: true,
-		Namespace:     "test-ns",
-		Pvc:           "test-pvc",
+		Namespace:     testNamespace,
+		Pvc:           testPVC,
 		Backend:       "s3",
 	}}
 	handler := New(mock, logger)
 
 	// Make a request to /exists
-	req := httptest.NewRequest("GET", "/exists/test-ns/test-pvc", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/exists/"+testNamespace+"/"+testPVC, nil)
 	w := httptest.NewRecorder()
 	handler.HandleExists(w, req)
 
 	// Check metrics
-	metricsReq := httptest.NewRequest("GET", "/metrics", nil)
+	metricsReq := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
 	metricsW := httptest.NewRecorder()
 	handler.HandleMetrics(metricsW, metricsReq)
 
@@ -307,20 +314,20 @@ func TestMetricsErrorCounter(t *testing.T) {
 		Exists:        false,
 		Decision:      backend.DecisionUnknown,
 		Authoritative: false,
-		Namespace:     "test-ns",
-		Pvc:           "test-pvc",
+		Namespace:     testNamespace,
+		Pvc:           testPVC,
 		Backend:       "s3",
 		Error:         "connection failed",
 	}}
 	handler := New(mock, logger)
 
 	// Make a request to /exists that will result in error
-	req := httptest.NewRequest("GET", "/exists/test-ns/test-pvc", nil)
+	req := httptest.NewRequestWithContext(context.Background(), "GET", "/exists/"+testNamespace+"/"+testPVC, nil)
 	w := httptest.NewRecorder()
 	handler.HandleExists(w, req)
 
 	// Check metrics
-	metricsReq := httptest.NewRequest("GET", "/metrics", nil)
+	metricsReq := httptest.NewRequestWithContext(context.Background(), "GET", "/metrics", nil)
 	metricsW := httptest.NewRecorder()
 	handler.HandleMetrics(metricsW, metricsReq)
 
