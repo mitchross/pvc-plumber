@@ -45,20 +45,22 @@ import (
 	pvcwebhook "github.com/mitchross/pvc-plumber/internal/webhook"
 )
 
-// defaultSystemNamespaces is the canonical 9-entry exclusion list. This
-// MUST stay in sync with the namespaceSelector in
-// `infrastructure/controllers/pvc-plumber/webhooks.yaml` — any namespace
-// listed there as `NotIn` for the webhook configurations must also be
-// excluded from the reconciler, otherwise the operator could try to
-// reconcile a PVC the webhook never gates and end up creating ES/RS/RD
-// objects in places that should be off-limits (e.g. cert-manager creating
-// a backup-labeled PVC for its own internal use would deadlock).
+// defaultSystemNamespaces is the canonical, deadlock-prevention namespace set
+// that pvc-plumber must NOT process under any circumstance. These entries are
+// always seeded into the SystemNamespaces set at startup; the
+// SYSTEM_NAMESPACES env var only ADDS to this list (see parseSystemNamespaces),
+// never replaces it. Drift between this list and the namespaceSelector NotIn
+// list in `infrastructure/controllers/pvc-plumber/webhooks.yaml` is the actual
+// cluster-safety bug — the env override is intentionally additive so an
+// operator can add e.g. `staging-infra` without losing kube-system.
 //
-// The design doc lists 5 entries and the legacy Kyverno YAML lists 3. The
-// 9-entry list is the authoritative one because admission deadlock
-// recovery (the original 2026-04-08 incident) requires that pvc-plumber
-// itself, plus every controller it depends on at startup, can create PVCs
-// even when the webhook is failurePolicy=Fail.
+// Background: the 9 entries reflect the admission deadlock recovery path
+// (origin: 2026-04-08 incident). pvc-plumber itself, plus every controller
+// it depends on at startup (cert-manager, external-secrets, the secret store,
+// snapshot-controller, longhorn, argocd, kyverno, kube-system controllers),
+// must be able to create PVCs while the webhook is failurePolicy=Fail.
+// Shrinking this list can wedge the cluster on bootstrap. The design doc and
+// legacy Kyverno YAML have shorter lists — both are stale; this is the canon.
 var defaultSystemNamespaces = []string{
 	"kube-system",
 	"volsync-system",
@@ -328,17 +330,23 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
-// parseSystemNamespaces converts a comma-separated env value into a set.
-// Empty / whitespace-only entries are dropped. When the input is empty the
-// 9-entry defaultSystemNamespaces is used so a misconfigured Deployment
-// still excludes the deadlock-critical namespaces.
+// parseSystemNamespaces builds the SystemNamespaces set: ALWAYS the 9
+// defaults, PLUS any extras supplied via the SYSTEM_NAMESPACES env var
+// (comma-separated). Whitespace-only entries are dropped. The defaults are
+// load-bearing for cluster safety (see defaultSystemNamespaces) and must
+// never be lost — the env var is purely additive so an operator can extend
+// the exclusion list with site-local namespaces (e.g. `staging-infra`)
+// without accidentally re-enabling reconciliation in kube-system.
 func parseSystemNamespaces(raw string) map[string]struct{} {
-	out := make(map[string]struct{})
-	source := defaultSystemNamespaces
-	if strings.TrimSpace(raw) != "" {
-		source = strings.Split(raw, ",")
+	out := make(map[string]struct{}, len(defaultSystemNamespaces)+8)
+	// Always seed the deadlock-prevention defaults first.
+	for _, ns := range defaultSystemNamespaces {
+		out[ns] = struct{}{}
 	}
-	for _, ns := range source {
+	if strings.TrimSpace(raw) == "" {
+		return out
+	}
+	for _, ns := range strings.Split(raw, ",") {
 		if trimmed := strings.TrimSpace(ns); trimmed != "" {
 			out[trimmed] = struct{}{}
 		}

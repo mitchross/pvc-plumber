@@ -67,9 +67,9 @@ var (
 // ExternalSecret, ReplicationSource, and ReplicationDestination resources.
 //
 // SystemNamespaces is the set of namespaces the reconciler refuses to
-// service. It is configured at startup from a comma-separated env var (Phase
-// 3 wires that — for now main.go leaves it nil, which means "service every
-// namespace"). A nil map is safe: `_, ok := nilMap[k]` always returns false.
+// service. Always set at startup from parseSystemNamespaces() in
+// cmd/operator/main.go; a nil map would process every namespace, which would
+// be a configuration error.
 type PVCReconciler struct {
 	client.Client
 
@@ -79,9 +79,15 @@ type PVCReconciler struct {
 	SystemNamespaces map[string]struct{}
 }
 
-//+kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
-//+kubebuilder:rbac:groups=external-secrets.io,resources=externalsecrets,verbs=get;list;watch;create;update;delete
-//+kubebuilder:rbac:groups=volsync.backube,resources=replicationsources;replicationdestinations,verbs=get;list;watch;create;update;delete
+// RBAC for this controller is hand-managed in
+// `infrastructure/controllers/pvc-plumber/rbac.yaml` (in the
+// talos-argocd-proxmox repo). Do NOT add `kubebuilder:rbac` markers here —
+// the cluster manifests are the source of truth, and stale markers risk
+// drift if anyone runs `controller-gen`. The hand-written ClusterRole
+// includes leases (leader election), events (controller-runtime event
+// emission), and `patch` verbs that the markers historically omitted; those
+// are required for the manager to start at all, so silent regeneration would
+// be a hard failure.
 
 // Reconcile is the controller entrypoint. The flow:
 //
