@@ -15,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -291,8 +292,9 @@ func (r *PVCReconciler) ensureReplicationDestination(ctx context.Context, pvc *c
 // cleanup deletes every child resource labeled `volsync.backup/pvc=<name>`
 // in the given namespace. It is the orphan reaper: when a PVC is removed
 // (or the backup label is dropped, or someone moves the PVC to a system
-// namespace), the children must follow. NotFound on individual deletes is
-// ignored — concurrent reaping is a feature, not a bug.
+// namespace), the children must follow. NotFound on individual deletes
+// and missing-CRD errors on List are both swallowed — see
+// ignoreNotFoundOrNoMatch.
 func (r *PVCReconciler) cleanup(ctx context.Context, namespace, name string) error {
 	for _, gvk := range childGVKs {
 		list := &unstructured.UnstructuredList{}
@@ -301,21 +303,50 @@ func (r *PVCReconciler) cleanup(ctx context.Context, namespace, name string) err
 			client.InNamespace(namespace),
 			client.MatchingLabels{pvcLabel: name},
 		); err != nil {
-			// CRD not installed yet → NoMatch / NotFound. Either way, no
-			// orphans of this kind exist; move on.
-			if apierrors.IsNotFound(err) {
-				continue
+			if e := ignoreNotFoundOrNoMatch(err); e != nil {
+				return e
 			}
-			return err
+			// CRD missing or namespace gone — no orphans of this kind
+			// could possibly exist; move to the next GVK.
+			continue
 		}
 		for i := range list.Items {
 			item := list.Items[i]
-			if err := r.Delete(ctx, &item); err != nil && !apierrors.IsNotFound(err) {
-				return err
+			if err := r.Delete(ctx, &item); err != nil {
+				if e := ignoreNotFoundOrNoMatch(err); e != nil {
+					return e
+				}
 			}
 		}
 	}
 	return nil
+}
+
+// ignoreNotFoundOrNoMatch swallows the two error classes that mean "the
+// thing you're looking for doesn't exist, and that's fine":
+//
+//  1. apierrors.IsNotFound — HTTP 404 from the API server (object or
+//     namespace was already deleted, or a Delete raced with another
+//     reaper).
+//  2. *meta.NoKindMatchError — the REST mapper has no entry for this
+//     GVK, which happens when the CRD itself isn't installed in the
+//     cluster. This is the normal state at first-boot before VolSync /
+//     external-secrets have been applied, and in dev/test clusters that
+//     don't run the full stack. Without this branch the reconciler enters
+//     an infinite-requeue loop on a backup-labeled PVC during bootstrap.
+//
+// All other errors propagate.
+func ignoreNotFoundOrNoMatch(err error) error {
+	if err == nil {
+		return nil
+	}
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if meta.IsNoMatchError(err) {
+		return nil
+	}
+	return err
 }
 
 // exists is a small helper that returns (true, nil) if the named object

@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -156,6 +158,61 @@ func TestCleanup_IgnoresNotFound(t *testing.T) {
 	// Empty cluster, nothing to delete — must be a clean no-op.
 	if err := r.cleanup(context.Background(), "any", "missing"); err != nil {
 		t.Fatalf("cleanup on empty cluster errored: %v", err)
+	}
+}
+
+// noMatchListClient wraps a fake client and forces every unstructured List
+// to return *meta.NoKindMatchError — the error class controller-runtime's
+// REST mapper produces when a GVK has no CRD installed in the cluster.
+// Building a real fake client with a deliberately-incomplete scheme would
+// either panic or surface a different error (the fake client's behavior
+// for unregistered GVKs is internal-implementation territory we don't want
+// to lean on); injecting the exact production error keeps the test
+// pinned to the contract `cleanup` actually has to honor.
+type noMatchListClient struct {
+	client.Client
+}
+
+func (c *noMatchListClient) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	u, ok := list.(*unstructured.UnstructuredList)
+	if !ok {
+		return nil
+	}
+	gvk := u.GroupVersionKind()
+	kind := strings.TrimSuffix(gvk.Kind, "List")
+	return &meta.NoKindMatchError{
+		GroupKind:        schema.GroupKind{Group: gvk.Group, Kind: kind},
+		SearchedVersions: []string{gvk.Version},
+	}
+}
+
+// TestCleanup_IgnoresMissingCRD verifies the orphan reaper does not
+// infinite-requeue a backup-labeled PVC during bootstrap or in dev/test
+// clusters that lack the VolSync / external-secrets CRDs. With no CRD
+// registered, the REST mapper returns *meta.NoKindMatchError on List —
+// `cleanup` must swallow that and return nil.
+func TestCleanup_IgnoresMissingCRD(t *testing.T) {
+	scheme := newTestScheme(t)
+	inner := fake.NewClientBuilder().WithScheme(scheme).Build()
+	wrapper := &noMatchListClient{Client: inner}
+
+	// Sanity-check: confirm meta.IsNoMatchError actually classifies the
+	// wrapper's error — if k8s.io/apimachinery ever changed the type
+	// surface this test fails loud rather than silent.
+	probeErr := wrapper.List(context.Background(),
+		func() *unstructured.UnstructuredList {
+			l := &unstructured.UnstructuredList{}
+			l.SetGroupVersionKind(rsGVK)
+			return l
+		}(),
+	)
+	if !meta.IsNoMatchError(probeErr) {
+		t.Fatalf("test setup is wrong: wrapper error %T %v is not classified as NoMatchError", probeErr, probeErr)
+	}
+
+	r := &PVCReconciler{Client: wrapper}
+	if err := r.cleanup(context.Background(), "app", "data"); err != nil {
+		t.Fatalf("cleanup on cluster with missing CRDs errored: %v (want nil — bootstrap path)", err)
 	}
 }
 
