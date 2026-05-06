@@ -107,7 +107,7 @@ func TestPVCValidate_RestoreWithWrongDataSourceRef_Denies(t *testing.T) {
 	// Operator (or mutator bug) put the wrong kind/apiGroup/name on the ref.
 	// Rule 3's `any` block flips all three NotEquals into denials.
 	cases := []struct {
-		name string
+		name   string
 		mutate func(*corev1.PersistentVolumeClaim)
 	}{
 		{
