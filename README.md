@@ -3,7 +3,17 @@
 [![Build and Test](https://github.com/mitchross/pvc-plumber/actions/workflows/build.yaml/badge.svg)](https://github.com/mitchross/pvc-plumber/actions/workflows/build.yaml)
 [![Release](https://github.com/mitchross/pvc-plumber/actions/workflows/release.yaml/badge.svg)](https://github.com/mitchross/pvc-plumber/actions/workflows/release.yaml)
 
-Lightweight K8s service that checks whether PVC backups exist in S3 or NFS-backed Kopia repositories. Enables zero-touch disaster recovery with Kyverno + VolSync.
+> 🚨 **`v2.0.0` is a major breaking release.** pvc-plumber is now a Kubernetes
+> operator (controller-runtime + admission webhooks) in addition to the
+> existing HTTP service. The HTTP `/exists` wire format is unchanged and the
+> operator surface can be disabled with `OPERATOR_MODE=false` for a drop-in
+> v1 replacement, but the deployment surface (RBAC, cert-manager, ESO,
+> webhook configurations, leader election) is substantially different.
+> Read [`CHANGELOG.md`](CHANGELOG.md) and
+> [`MIGRATION-v1-to-v2.md`](MIGRATION-v1-to-v2.md) before bumping from any
+> `1.x` tag.
+
+Lightweight K8s service that checks whether PVC backups exist in S3 or NFS-backed Kopia repositories. From `v2.0.0` onward it also acts as the Kubernetes operator that owns the VolSync `ExternalSecret` / `ReplicationSource` / `ReplicationDestination` lifecycle and gates PVC creation through admission webhooks. Enables zero-touch disaster recovery with VolSync.
 
 ## Overview
 
@@ -54,19 +64,50 @@ When a PVC is created:
 
 ## Quick Start
 
+### Operating mode (`v2.0.0`+)
+
+The `2.0.0` image runs in two modes, selected by the `OPERATOR_MODE` env
+var. Both modes share the same backend and the same in-process Kopia
+connection.
+
+| `OPERATOR_MODE` | Behaviour | When to use |
+|---|---|---|
+| `true` | HTTP `/exists` server **plus** controller-runtime manager + 3 admission webhooks + PVC reconciler | Production v2 deployment. Requires cert-manager, ESO, RBAC, webhook configurations — see [`MIGRATION-v1-to-v2.md`](MIGRATION-v1-to-v2.md). |
+| `false` (or unset) | HTTP `/exists` server only; manager and webhooks disabled | Drop-in v1 replacement. Useful as a staging step during a v1→v2 cutover, or for non-Kubernetes hosts that just want the existence oracle. |
+
+The CLI examples below demonstrate the HTTP-only surface
+(`OPERATOR_MODE=false`) — running the full operator outside of
+Kubernetes isn't supported.
+
 ### S3 Backend (Default)
 
 ```bash
 docker run -p 8080:8080 \
+  -e OPERATOR_MODE=false \
   -e S3_ENDPOINT=minio.example.com:9000 \
   -e S3_BUCKET=volsync-backup \
   -e S3_ACCESS_KEY=your-access-key \
   -e S3_SECRET_KEY=your-secret-key \
   -e S3_SECURE=false \
-  ghcr.io/mitchross/pvc-plumber:1.5.1
+  ghcr.io/mitchross/pvc-plumber:2.0.0
 ```
 
 ### Kopia Filesystem Backend
+
+```bash
+docker run -p 8080:8080 \
+  -e OPERATOR_MODE=false \
+  -e BACKEND_TYPE=kopia-fs \
+  -e KOPIA_REPOSITORY_PATH=/repository \
+  -e KOPIA_PASSWORD=your-repository-password \
+  -v /path/to/nfs/repo:/repository:ro \
+  ghcr.io/mitchross/pvc-plumber:2.0.0
+```
+
+### v1 (legacy) image
+
+If you're not ready to bump to `2.0.0` yet, the last stable v1 release
+remains available:
 
 ```bash
 docker run -p 8080:8080 \
@@ -74,7 +115,7 @@ docker run -p 8080:8080 \
   -e KOPIA_REPOSITORY_PATH=/repository \
   -e KOPIA_PASSWORD=your-repository-password \
   -v /path/to/nfs/repo:/repository:ro \
-  ghcr.io/mitchross/pvc-plumber:1.5.1
+  ghcr.io/mitchross/pvc-plumber:1.7.0
 ```
 
 ## API Documentation
