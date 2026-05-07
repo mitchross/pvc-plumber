@@ -63,11 +63,19 @@ jobs:
       uses: docker/metadata-action@v5
       with:
         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        # Tag policy:
+        #   stable releases (e.g. v2.0.0)        → :2.0.0, :2.0, :2, :latest
+        #   prereleases   (e.g. v2.0.0-rc1)      → :2.0.0-rc1   (no :2.0, no :2, no :latest)
+        # Reasoning: prereleases must NOT promote :latest because external pullers
+        # tracking :latest get auto-upgraded to a release-candidate they didn't
+        # opt into. The `enable=...` condition on the prerelease-sensitive tags
+        # uses semver convention: a "-" in the tag name indicates a prerelease
+        # (per https://semver.org/#spec-item-9).
         tags: |
           type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=semver,pattern={{major}}
-          type=raw,value=latest
+          type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
+          type=semver,pattern={{major}},enable=${{ !contains(github.ref_name, '-') }}
+          type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
@@ -122,6 +130,9 @@ jobs:
           docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
           \`\`\`
         draft: false
-        prerelease: false
+        # Auto-detect prerelease from the tag name. Semver convention: any tag
+        # carrying a "-" suffix (rc/beta/alpha/etc.) is a prerelease. Pairs
+        # with the conditional :latest tag policy above.
+        prerelease: ${{ contains(github.ref_name, '-') }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
