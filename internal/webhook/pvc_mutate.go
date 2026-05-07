@@ -36,6 +36,12 @@ const (
 	backupLabelDay   = "daily"
 	skipRestoreAnnot = "volsync.backup/skip-restore"
 
+	// backupExemptLabel opts a PVC out of all pvc-plumber backup automation.
+	// Pairs with the required `backupExemptReasonAnnot` audit-trail
+	// annotation, which is enforced by PVCValidator. Mutator simply skips
+	// any dataSourceRef injection for an exempt PVC.
+	backupExemptLabel = "backup-exempt"
+
 	dataSourceAPIGroup = "volsync.backube"
 	dataSourceKind     = "ReplicationDestination"
 	dataSourceSuffix   = "-backup"
@@ -88,16 +94,30 @@ func (h *PVCMutator) Handle(ctx context.Context, req admission.Request) admissio
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
-	// Out-of-scope PVCs: no backup label, system namespace, explicit opt-out,
+	// System namespaces are never processed regardless of labels. The
+	// webhook namespaceSelector is the primary gate, but this handler-level
+	// check is defense-in-depth so a namespaceSelector misconfiguration
+	// can't cause us to mutate PVC creation in infrastructure namespaces.
+	// MUST run before any label-based path so the validator's symmetric
+	// hoist isn't undermined by a divergent mutator ordering.
+	if _, ok := h.SystemNamespaces[pvc.Namespace]; ok {
+		return admission.Allowed("")
+	}
+
+	// Out-of-scope PVCs: no backup label, explicit opt-out, exempt label,
 	// or operator-supplied dataSourceRef. The Kyverno rule 2 preconditions
 	// drop on the same conditions.
+	//
+	// backup-exempt overrides the backup label if both are present (matching
+	// the validator's ordering). Skip dataSourceRef injection for an exempt
+	// PVC — exempt wins over restore.
+	if pvc.Labels[backupExemptLabel] == annotTrue {
+		return admission.Allowed("")
+	}
 	if !hasBackupLabel(pvc) {
 		return admission.Allowed("")
 	}
 	if pvc.Annotations[skipRestoreAnnot] == annotTrue {
-		return admission.Allowed("")
-	}
-	if _, ok := h.SystemNamespaces[pvc.Namespace]; ok {
 		return admission.Allowed("")
 	}
 	if pvc.Spec.DataSourceRef != nil {

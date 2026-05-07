@@ -60,7 +60,13 @@ func pvcRequest(t *testing.T, pvc *corev1.PersistentVolumeClaim) admission.Reque
 // tests. Kept short and not visually similar to "data" / "backup" / etc. so
 // log output reads cleanly. Every backupPVC() call uses this — the helper
 // previously took a `name` parameter that always received "blue" (unparam).
-const testBackupPVCName = "blue"
+const (
+	testBackupPVCName = "blue"
+	// kubeSystemNS is used in multiple tests to verify the system-namespace
+	// handler-level skip path. Extracted as a constant per goconst lint
+	// (>=3 occurrences across mutate + validate test files).
+	kubeSystemNS = "kube-system"
+)
 
 // backupPVC builds a backup-labeled PVC in the given namespace using the
 // shared testBackupPVCName. The name parameter was dropped after every call
@@ -74,7 +80,7 @@ func backupPVC(ns string) *corev1.PersistentVolumeClaim {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testBackupPVCName,
 			Namespace: ns,
-			Labels:    map[string]string{"backup": "hourly"},
+			Labels:    map[string]string{backupLabelKey: backupLabelHour},
 		},
 	}
 }
@@ -217,12 +223,12 @@ func TestPVCMutate_NoBackupLabel_AllowsWithoutCheck(t *testing.T) {
 }
 
 func TestPVCMutate_SystemNamespace_AllowsWithoutCheck(t *testing.T) {
-	pvc := backupPVC("kube-system")
+	pvc := backupPVC(kubeSystemNS)
 	kopia := &fakeKopia{}
 	mut := &PVCMutator{
 		Decoder:          newDecoder(t),
 		Kopia:            kopia,
-		SystemNamespaces: map[string]struct{}{"kube-system": {}},
+		SystemNamespaces: map[string]struct{}{kubeSystemNS: {}},
 	}
 
 	resp := mut.Handle(context.Background(), pvcRequest(t, pvc))
@@ -246,6 +252,35 @@ func TestPVCMutate_SkipRestore_AllowsWithoutCheck(t *testing.T) {
 	}
 	if len(kopia.calls) != 0 {
 		t.Errorf("expected zero kopia calls with skip-restore=true, got %d", len(kopia.calls))
+	}
+}
+
+func TestPVCMutate_BackupExempt_NoPatch(t *testing.T) {
+	// Exempt must win over a kopia restore decision: even with a clear
+	// "restore me" verdict, an exempt PVC must not get dataSourceRef
+	// injected. Same shape as the skip-restore short-circuit but on the
+	// label rather than annotation.
+	pvc := backupPVC("media")
+	pvc.Labels = map[string]string{
+		backupLabelKey:    backupLabelHour,
+		backupExemptLabel: annotTrue,
+	}
+	kopia := &fakeKopia{result: backend.CheckResult{
+		Exists:        true,
+		Decision:      backend.DecisionRestore,
+		Authoritative: true,
+	}}
+	mut := &PVCMutator{Decoder: newDecoder(t), Kopia: kopia}
+
+	resp := mut.Handle(context.Background(), pvcRequest(t, pvc))
+	if !resp.Allowed {
+		t.Fatalf("expected allowed=true with backup-exempt=true, got denied")
+	}
+	if len(resp.Patches) != 0 {
+		t.Errorf("expected no patches on exempt PVC, got %d", len(resp.Patches))
+	}
+	if len(kopia.calls) != 0 {
+		t.Errorf("expected zero kopia calls on exempt PVC, got %d", len(kopia.calls))
 	}
 }
 
