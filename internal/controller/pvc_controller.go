@@ -10,6 +10,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -45,6 +47,12 @@ const (
 	// they're identical strings and goconst treats them as one occurrence
 	// set.
 	dataField = "data"
+
+	// backupExemptLabel opts a PVC out of all pvc-plumber backup automation
+	// (no ES/RS/RD created; admission webhooks short-circuit allow). Pairs
+	// with the required `backupExemptReasonAnnot` audit-trail annotation.
+	// See v3 spec § "Labels and annotations contract".
+	backupExemptLabel = "backup-exempt"
 )
 
 // GVKs for the three child kinds. We use unstructured everywhere so the
@@ -130,8 +138,13 @@ func (r *PVCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	label := pvc.Labels[backupLabelKey]
 	isBackupLabeled := label == backupHourly || label == backupDaily
 	_, inSystemNS := r.SystemNamespaces[pvc.Namespace]
+	// `backup-exempt: "true"` is the explicit "this PVC is intentionally not
+	// backed up" opt-out. Treat it the same as label-removed: if a previously
+	// backup-labeled PVC has exempt added, reap any managed-by children so we
+	// don't keep a stale ES/RS/RD pinned to an exempt PVC.
+	isExempt := pvc.Labels[backupExemptLabel] == "true"
 
-	if !pvc.DeletionTimestamp.IsZero() || !isBackupLabeled || inSystemNS {
+	if !pvc.DeletionTimestamp.IsZero() || !isBackupLabeled || inSystemNS || isExempt {
 		if err := r.cleanup(ctx, pvc.Namespace, pvc.Name); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -163,14 +176,22 @@ func (r *PVCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	return ctrl.Result{}, nil
 }
 
-// backupSchedule mirrors Kyverno rule 6 EXACTLY. The minute is computed from
-// the *length of the joined "ns-pvcName" string* — not len(ns)+len(pvcName)
-// (which differs by 1 for the dash). This is a length-mod scheme, not a
-// real hash; it's good enough for spreading <50 PVCs across the minute
-// field but clusters once inventory grows. Replacing this with a sha-derived
-// minute is a Phase 4 problem, not a Phase 2 problem.
+// backupSchedule returns a deterministic crontab string for the given PVC.
+// minute = first 4 bytes of sha256(ns + "/" + pvcName) interpreted as
+// big-endian uint32, modulo 60. Distributes uniformly across the minute
+// field regardless of name-length clustering, which the previous
+// length-mod-60 formula suffered from (PVCs with names of similar length
+// all landed on the same minute).
+//
+// Replaces the temporary length-mod approach inherited from the original
+// Kyverno generate rule. Existing ReplicationSources keep their generated
+// minute (they're idempotent Get-or-Create); only newly-created PVCs get
+// the new schedule. The ns/pvcName separator is `"/"` (matching the v3
+// spec's `sha256(ns + "/" + pvc)` formula); the previous separator was `-`,
+// which the test suite explicitly pinned to keep the formula stable.
 func backupSchedule(namespace, pvcName, label string) string {
-	minute := len(namespace+"-"+pvcName) % 60
+	sum := sha256.Sum256([]byte(namespace + "/" + pvcName))
+	minute := int(binary.BigEndian.Uint32(sum[:4]) % 60)
 	if label == backupHourly {
 		return fmt.Sprintf("%d * * * *", minute)
 	}

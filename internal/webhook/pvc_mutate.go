@@ -36,6 +36,12 @@ const (
 	backupLabelDay   = "daily"
 	skipRestoreAnnot = "volsync.backup/skip-restore"
 
+	// backupExemptLabel opts a PVC out of all pvc-plumber backup automation.
+	// Pairs with the required `backupExemptReasonAnnot` audit-trail
+	// annotation, which is enforced by PVCValidator. Mutator simply skips
+	// any dataSourceRef injection for an exempt PVC.
+	backupExemptLabel = "backup-exempt"
+
 	dataSourceAPIGroup = "volsync.backube"
 	dataSourceKind     = "ReplicationDestination"
 	dataSourceSuffix   = "-backup"
@@ -91,6 +97,13 @@ func (h *PVCMutator) Handle(ctx context.Context, req admission.Request) admissio
 	// Out-of-scope PVCs: no backup label, system namespace, explicit opt-out,
 	// or operator-supplied dataSourceRef. The Kyverno rule 2 preconditions
 	// drop on the same conditions.
+	//
+	// backup-exempt overrides the backup label if both are present (matching
+	// the validator's ordering). Skip dataSourceRef injection for an exempt
+	// PVC — exempt wins over restore.
+	if pvc.Labels[backupExemptLabel] == "true" {
+		return admission.Allowed("")
+	}
 	if !hasBackupLabel(pvc) {
 		return admission.Allowed("")
 	}

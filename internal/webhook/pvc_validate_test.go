@@ -232,6 +232,83 @@ func TestPVCValidate_SystemNamespace_Allows(t *testing.T) {
 	}
 }
 
+func TestPVCValidate_BackupExempt_NoReason_Denies(t *testing.T) {
+	// backup-exempt without a reason annotation must deny — the audit-trail
+	// requirement is symmetric with skip-restore-reason.
+	pvc := backupPVC("media")
+	// Drop the backup label so we exercise the exempt-only path; the
+	// objectSelector in the cluster would not match this PVC, but the
+	// handler is defense-in-depth.
+	pvc.Labels = map[string]string{"backup-exempt": "true"}
+	kopia := &fakeKopia{}
+	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
+
+	resp := val.Handle(context.Background(), pvcRequest(t, pvc))
+	if resp.Allowed {
+		t.Fatalf("expected denied when backup-exempt=true and no reason, got allowed")
+	}
+	if !strings.Contains(resp.Result.Message, "backup-exempt-reason") {
+		t.Errorf("unexpected deny message: %q", resp.Result.Message)
+	}
+	// Exempt short-circuits before kopia is consulted.
+	if len(kopia.calls) != 0 {
+		t.Errorf("expected zero kopia calls when backup-exempt=true, got %d", len(kopia.calls))
+	}
+}
+
+func TestPVCValidate_BackupExempt_WithReason_Allows(t *testing.T) {
+	pvc := backupPVC("media")
+	pvc.Labels = map[string]string{"backup-exempt": "true"}
+	pvc.Annotations = map[string]string{
+		"storage.vanillax.dev/backup-exempt-reason": "cache",
+	}
+	// Even if kopia would deny, exempt with a reason short-circuits.
+	kopia := &fakeKopia{result: backend.CheckResult{
+		Decision:      backend.DecisionUnknown,
+		Authoritative: false,
+		Error:         "this would normally deny",
+	}}
+	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
+
+	resp := val.Handle(context.Background(), pvcRequest(t, pvc))
+	if !resp.Allowed {
+		t.Fatalf("expected allowed for backup-exempt with reason, got denied: %s", resp.Result.Message)
+	}
+	if len(kopia.calls) != 0 {
+		t.Errorf("expected zero kopia calls on exempt path, got %d", len(kopia.calls))
+	}
+}
+
+func TestPVCValidate_BackupExempt_TakesPrecedenceOverBackupLabel(t *testing.T) {
+	// PVC carries both `backup: hourly` AND `backup-exempt: "true"` — the
+	// "user just added exempt to a previously-backed-up PVC" transition.
+	// Exempt must win: allow without consulting kopia, regardless of what
+	// the backup label would otherwise require.
+	pvc := backupPVC("media")
+	pvc.Labels = map[string]string{
+		"backup":        "hourly",
+		"backup-exempt": "true",
+	}
+	pvc.Annotations = map[string]string{
+		"storage.vanillax.dev/backup-exempt-reason": "scratch",
+	}
+	kopia := &fakeKopia{result: backend.CheckResult{
+		// Set up a state that would otherwise deny — proves exempt
+		// short-circuits before the kopia path runs.
+		Decision:      backend.DecisionUnknown,
+		Authoritative: false,
+	}}
+	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
+
+	resp := val.Handle(context.Background(), pvcRequest(t, pvc))
+	if !resp.Allowed {
+		t.Fatalf("expected exempt to override backup label, got denied: %s", resp.Result.Message)
+	}
+	if len(kopia.calls) != 0 {
+		t.Errorf("expected zero kopia calls when exempt overrides backup label, got %d", len(kopia.calls))
+	}
+}
+
 func TestPVCValidate_NoBackupLabel_Allows(t *testing.T) {
 	pvc := backupPVC("media")
 	pvc.Labels = nil

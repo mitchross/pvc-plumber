@@ -249,6 +249,35 @@ func TestPVCMutate_SkipRestore_AllowsWithoutCheck(t *testing.T) {
 	}
 }
 
+func TestPVCMutate_BackupExempt_NoPatch(t *testing.T) {
+	// Exempt must win over a kopia restore decision: even with a clear
+	// "restore me" verdict, an exempt PVC must not get dataSourceRef
+	// injected. Same shape as the skip-restore short-circuit but on the
+	// label rather than annotation.
+	pvc := backupPVC("media")
+	pvc.Labels = map[string]string{
+		"backup":        "hourly",
+		"backup-exempt": "true",
+	}
+	kopia := &fakeKopia{result: backend.CheckResult{
+		Exists:        true,
+		Decision:      backend.DecisionRestore,
+		Authoritative: true,
+	}}
+	mut := &PVCMutator{Decoder: newDecoder(t), Kopia: kopia}
+
+	resp := mut.Handle(context.Background(), pvcRequest(t, pvc))
+	if !resp.Allowed {
+		t.Fatalf("expected allowed=true with backup-exempt=true, got denied")
+	}
+	if len(resp.Patches) != 0 {
+		t.Errorf("expected no patches on exempt PVC, got %d", len(resp.Patches))
+	}
+	if len(kopia.calls) != 0 {
+		t.Errorf("expected zero kopia calls on exempt PVC, got %d", len(kopia.calls))
+	}
+}
+
 func TestPVCMutate_NonCreate_AllowsImmediately(t *testing.T) {
 	pvc := backupPVC("media")
 	raw, _ := json.Marshal(pvc)

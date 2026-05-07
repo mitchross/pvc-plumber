@@ -18,6 +18,14 @@ import (
 // operator must justify it.
 const skipRestoreReasonAnnot = "volsync.backup/skip-restore-reason"
 
+// Annotation paired with the `backup-exempt: "true"` label. Documents WHY a
+// PVC is intentionally not backed up (cache, scratch, external-source,
+// media-on-nas, database-native, test, …). Required to be non-empty
+// whenever the exempt label is "true" — same audit-trail rationale as
+// skip-restore-reason. See v3 spec § "Labels and annotations contract" in
+// /home/vanillax/programming/talos-argocd-proxmox/docs/plans/pvc-plumber-v3-roadmap.md.
+const backupExemptReasonAnnot = "storage.vanillax.dev/backup-exempt-reason"
+
 // Deny messages — kept as constants so they're easy to keep in sync with the
 // Kyverno YAML these handlers replace. Operators searching for a deny
 // message in alerts/PR review will land on these strings.
@@ -40,6 +48,11 @@ const (
 		"fail-closed admission gate and could initialize an empty volume over a real " +
 		"Kopia backup. Add an annotation explaining why, e.g. " +
 		"volsync.backup/skip-restore-reason=\"<reason>\"."
+
+	denyMsgBackupExemptNoReason = "PVC has backup-exempt=true but is missing " +
+		"storage.vanillax.dev/backup-exempt-reason annotation. Required values: " +
+		"cache, scratch, external-source, media-on-nas, database-native, test " +
+		"(or document a custom reason)."
 )
 
 // PVCValidator is the validating admission handler for PersistentVolumeClaim
@@ -73,6 +86,20 @@ func (h *PVCValidator) Handle(ctx context.Context, req admission.Request) admiss
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := h.Decoder.Decode(req, pvc); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
+	}
+
+	// backup-exempt is checked BEFORE the backup-label gate because a PVC
+	// can carry both `backup: hourly|daily` and `backup-exempt: "true"`
+	// during the "user added exempt to a previously-backed-up PVC"
+	// transition — exempt overrides the backup label. The required
+	// reason annotation is the same audit-trail discipline applied to
+	// skip-restore: a stale label in Git silently disables backup forever,
+	// so the operator must justify it inline.
+	if pvc.Labels[backupExemptLabel] == "true" {
+		if pvc.Annotations[backupExemptReasonAnnot] == "" {
+			return admission.Denied(denyMsgBackupExemptNoReason)
+		}
+		return admission.Allowed("")
 	}
 
 	if !hasBackupLabel(pvc) {

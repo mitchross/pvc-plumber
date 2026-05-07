@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -82,23 +83,36 @@ func childObject(gvk schema.GroupVersionKind, namespace, name, pvcName string) *
 }
 
 func TestBackupSchedule_HourlyDaily(t *testing.T) {
+	// Expected values are the SHA256-derived minutes:
+	//   minute = uint32(big-endian first 4 bytes of sha256(ns + "/" + pvc)) % 60
+	// Pre-computed locally; if the formula or separator ever drifts these
+	// will fail loud. v3 spec § "SHA256 schedule formula" is the source of
+	// truth — see /home/vanillax/programming/talos-argocd-proxmox/docs/plans/pvc-plumber-v3-roadmap.md.
 	cases := []struct {
 		ns       string
 		pvc      string
-		label    string
 		wantHour string
 		wantDay  string
 	}{
-		// "ns-pvc" → 6 chars → minute 6
-		{ns: "ns", pvc: "pvc", wantHour: "6 * * * *", wantDay: "6 2 * * *"},
-		// "default-data" → 12 chars → minute 12
-		{ns: "default", pvc: testPVCName, wantHour: "12 * * * *", wantDay: "12 2 * * *"},
-		// 60-char joined string → minute 0
+		// SHA256-based schedule (v2.1+). Each expected minute is the first 4
+		// big-endian bytes of sha256(ns + "/" + pvcName) mod 60. See v3 roadmap
+		// §"Resolved questions". testPVCName == "data" (lint-extracted constant).
+		// sha256("ns/pvc") → 26
+		{ns: "ns", pvc: "pvc", wantHour: "26 * * * *", wantDay: "26 2 * * *"},
+		// sha256("default/data") → 3
+		{ns: "default", pvc: testPVCName, wantHour: "3 * * * *", wantDay: "3 2 * * *"},
+		// sha256("karakeep/data-pvc") → 10 — picked from the v3 spec's
+		// own example PVC name to anchor the formula here.
+		{ns: "karakeep", pvc: "data-pvc", wantHour: "10 * * * *", wantDay: "10 2 * * *"},
+		// Distinct from the equivalent length-mod result (60-char joined
+		// string used to land on minute 0 under the deprecated formula).
+		// SHA256 returns 33 here — also serves as a regression pin against
+		// accidental reversion to length-mod.
 		{
 			ns:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 30
-			pvc:      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbb",  // 29 + dash = 60
-			wantHour: "0 * * * *",
-			wantDay:  "0 2 * * *",
+			pvc:      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbb",  // 29
+			wantHour: "33 * * * *",
+			wantDay:  "33 2 * * *",
 		},
 	}
 	for _, c := range cases {
@@ -112,13 +126,65 @@ func TestBackupSchedule_HourlyDaily(t *testing.T) {
 		}
 	}
 
-	// Sanity: the design doc's WRONG formula (len(ns)+len(pvc)) gives the
-	// same minute in every test case above except when there's a dash
-	// boundary. Pin the difference here so a future refactor that "fixes"
-	// the formula back to len(ns)+len(pvc) breaks loudly: "a"+"b" yields
-	// minute=3 (len("a-b")=3), not 2.
-	if got := backupSchedule("a", "b", "hourly"); got != "3 * * * *" {
-		t.Errorf("backupSchedule must use len(ns+\"-\"+pvc), got %q (regression: design-doc formula)", got)
+	// Pin against accidental reversion to the previous length-mod scheme.
+	// Old formula: len("a-b") % 60 = 3 → "3 * * * *".
+	// New formula: sha256("a/b") first 4 BE bytes % 60 = 52 → "52 * * * *".
+	// If anyone "simplifies" backupSchedule back to length-mod this fires.
+	if got := backupSchedule("a", "b", "hourly"); got != "52 * * * *" {
+		t.Errorf("backupSchedule must use SHA256(ns + \"/\" + pvc); got %q (regression: length-mod scheme)", got)
+	}
+}
+
+// TestBackupSchedule_DistributionIsUniform asserts the SHA256 derivation
+// distributes minute values close to uniformly across [0,60). 1000 synthetic
+// PVC keys are hashed; if the function ever silently regresses to length-mod
+// (or another distribution-clustering scheme) variance spikes far past the
+// thresholds below.
+//
+// Math: 1000 keys / 60 buckets ≈ 16.67 expected per bucket. For a uniform
+// distribution the per-bucket count follows Binomial(n=1000, p=1/60), which
+// has mean 16.67 and stddev ≈ 4.05. We pin "no bucket is empty" (anything
+// short of catastrophically clustered passes) and "no bucket is overfull"
+// (>40 — that's >5 stddev above the mean, statistically implausible for any
+// reasonable hash but trivially achievable by length-mod when names share
+// length).
+func TestBackupSchedule_DistributionIsUniform(t *testing.T) {
+	const total = 1000
+	buckets := make(map[int]int, 60)
+	for i := 0; i < total; i++ {
+		ns := fmt.Sprintf("ns-%d", i)
+		pvc := fmt.Sprintf("pvc-%d", i)
+		s := backupSchedule(ns, pvc, "hourly")
+		var minute int
+		// Schedules look like "<minute> * * * *"; parse the first int.
+		if _, err := fmt.Sscanf(s, "%d", &minute); err != nil {
+			t.Fatalf("parse minute from %q: %v", s, err)
+		}
+		if minute < 0 || minute >= 60 {
+			t.Fatalf("minute %d out of [0,60) for %s/%s", minute, ns, pvc)
+		}
+		buckets[minute]++
+	}
+	if len(buckets) < 60 {
+		// Length-mod over names of varying length still hits all 60
+		// buckets if the names span enough lengths, but our generator
+		// produces names whose length varies in a tightly bounded range.
+		// Under length-mod many of the 60 buckets would be empty here.
+		t.Errorf("only %d/60 minute buckets populated — distribution looks clustered", len(buckets))
+	}
+	// Per-bucket bounds. Tightening these much further would risk flake
+	// even though the underlying RNG (SHA256) is deterministic — they're
+	// pinned generously to leave headroom for any future input change.
+	const minPerBucket = 3
+	const maxPerBucket = 40
+	for m := 0; m < 60; m++ {
+		count := buckets[m]
+		if count < minPerBucket {
+			t.Errorf("minute %d had %d hits (< %d); distribution likely regressed to length-mod or worse", m, count, minPerBucket)
+		}
+		if count > maxPerBucket {
+			t.Errorf("minute %d had %d hits (> %d); distribution likely regressed to length-mod or worse", m, count, maxPerBucket)
+		}
 	}
 }
 
@@ -359,9 +425,9 @@ func TestReconcile_BoundOld_CreatesAllThree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read schedule: %v", err)
 	}
-	// "app-data" = 8 chars → minute 8, hourly.
-	if schedule != "8 * * * *" {
-		t.Errorf("RS schedule = %q, want %q", schedule, "8 * * * *")
+	// sha256("app/data") first 4 BE bytes mod 60 = 58, hourly.
+	if schedule != "58 * * * *" {
+		t.Errorf("RS schedule = %q, want %q", schedule, "58 * * * *")
 	}
 }
 
@@ -393,4 +459,43 @@ func absDuration(d time.Duration) time.Duration {
 		return -d
 	}
 	return d
+}
+
+// TestReconcile_BackupExempt_TriggersCleanup covers the "user added
+// backup-exempt=true to a previously-backed-up PVC" transition. The
+// reconciler must reap any managed-by children even though the PVC still
+// carries the original `backup: hourly|daily` label — exempt is the
+// override.
+func TestReconcile_BackupExempt_TriggersCleanup(t *testing.T) {
+	scheme := newTestScheme(t)
+	// PVC is backup-labeled (would normally produce children) AND
+	// backup-exempt=true (override → cleanup). Bound and old enough that
+	// the non-exempt path would have created all three children.
+	pvc := labeledPVC("app", "data", "hourly", corev1.ClaimBound, 3*time.Hour)
+	pvc.Labels[backupExemptLabel] = "true"
+
+	// Pre-existing children labeled by pvc-plumber from before exempt was
+	// added. Reconcile must reap them.
+	es := childObject(esGVK, "app", "volsync-data", "data")
+	rs := childObject(rsGVK, "app", "data-backup", "data")
+	rd := childObject(rdGVK, "app", "data-backup", "data")
+
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pvc, es, rs, rd).
+		Build()
+	r := &PVCReconciler{Client: cli}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app", Name: "data"}})
+	if err != nil {
+		t.Fatalf("reconcile errored: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("RequeueAfter = %v, want 0 (exempt → cleanup → done)", res.RequeueAfter)
+	}
+
+	// All three children must have been reaped.
+	mustNotExist(t, cli, esGVK, "volsync-data")
+	mustNotExist(t, cli, rsGVK, "data-backup")
+	mustNotExist(t, cli, rdGVK, "data-backup")
 }
