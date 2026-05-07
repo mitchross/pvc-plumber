@@ -88,6 +88,18 @@ func (h *PVCValidator) Handle(ctx context.Context, req admission.Request) admiss
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
+	// System namespaces are never processed regardless of labels. The
+	// webhook namespaceSelector is the primary gate, but this handler-level
+	// check is defense-in-depth so a namespaceSelector misconfiguration
+	// can't cause us to deny PVC creation in infrastructure namespaces
+	// (which would deadlock storage controllers). MUST run before any
+	// label-based denial path — most critically backup-exempt's missing-reason
+	// branch, which would otherwise propagate handler denials into kube-system,
+	// cert-manager, etc. on a stale/incorrect label.
+	if _, ok := h.SystemNamespaces[pvc.Namespace]; ok {
+		return admission.Allowed("")
+	}
+
 	// backup-exempt is checked BEFORE the backup-label gate because a PVC
 	// can carry both `backup: hourly|daily` and `backup-exempt: "true"`
 	// during the "user added exempt to a previously-backed-up PVC"
@@ -95,7 +107,7 @@ func (h *PVCValidator) Handle(ctx context.Context, req admission.Request) admiss
 	// reason annotation is the same audit-trail discipline applied to
 	// skip-restore: a stale label in Git silently disables backup forever,
 	// so the operator must justify it inline.
-	if pvc.Labels[backupExemptLabel] == "true" {
+	if pvc.Labels[backupExemptLabel] == annotTrue {
 		if pvc.Annotations[backupExemptReasonAnnot] == "" {
 			return admission.Denied(denyMsgBackupExemptNoReason)
 		}
@@ -103,9 +115,6 @@ func (h *PVCValidator) Handle(ctx context.Context, req admission.Request) admiss
 	}
 
 	if !hasBackupLabel(pvc) {
-		return admission.Allowed("")
-	}
-	if _, ok := h.SystemNamespaces[pvc.Namespace]; ok {
 		return admission.Allowed("")
 	}
 

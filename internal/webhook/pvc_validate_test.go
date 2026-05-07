@@ -211,7 +211,7 @@ func TestPVCValidate_SkipRestoreWithReason_Allows(t *testing.T) {
 }
 
 func TestPVCValidate_SystemNamespace_Allows(t *testing.T) {
-	pvc := backupPVC("kube-system")
+	pvc := backupPVC(kubeSystemNS)
 	kopia := &fakeKopia{result: backend.CheckResult{
 		// Even an unknown decision wouldn't deny — system namespace skips first.
 		Decision:      backend.DecisionUnknown,
@@ -220,12 +220,40 @@ func TestPVCValidate_SystemNamespace_Allows(t *testing.T) {
 	val := &PVCValidator{
 		Decoder:          newDecoder(t),
 		Kopia:            kopia,
-		SystemNamespaces: map[string]struct{}{"kube-system": {}, "volsync-system": {}, "kyverno": {}},
+		SystemNamespaces: map[string]struct{}{kubeSystemNS: {}, "volsync-system": {}, "kyverno": {}},
 	}
 
 	resp := val.Handle(context.Background(), pvcRequest(t, pvc))
 	if !resp.Allowed {
 		t.Fatalf("expected allowed for system namespace, got denied: %s", resp.Result.Message)
+	}
+	if len(kopia.calls) != 0 {
+		t.Errorf("expected zero kopia calls for system namespace, got %d", len(kopia.calls))
+	}
+}
+
+func TestPVCValidate_SystemNamespace_BackupExempt_NoReason_Allows(t *testing.T) {
+	// Defense-in-depth ordering pin: a system-namespace PVC carrying
+	// `backup-exempt: "true"` and NO reason annotation must still be
+	// allowed — system-namespace skip wins over the exempt-deny path. The
+	// webhook namespaceSelector is the primary gate, but if it ever drifts
+	// (e.g. someone adds a new infra namespace and forgets to update the
+	// webhook config) we cannot leak a handler-level denial into a
+	// storage-critical namespace and deadlock controllers.
+	pvc := backupPVC(kubeSystemNS)
+	pvc.Labels = map[string]string{backupExemptLabel: annotTrue}
+	// No backup-exempt-reason annotation set on purpose — this would deny
+	// in any other namespace.
+	kopia := &fakeKopia{}
+	val := &PVCValidator{
+		Decoder:          newDecoder(t),
+		Kopia:            kopia,
+		SystemNamespaces: map[string]struct{}{kubeSystemNS: {}, "volsync-system": {}, "kyverno": {}},
+	}
+
+	resp := val.Handle(context.Background(), pvcRequest(t, pvc))
+	if !resp.Allowed {
+		t.Fatalf("expected allowed for system-namespace PVC even with backup-exempt=true and no reason; got denied: %s", resp.Result.Message)
 	}
 	if len(kopia.calls) != 0 {
 		t.Errorf("expected zero kopia calls for system namespace, got %d", len(kopia.calls))
@@ -239,7 +267,7 @@ func TestPVCValidate_BackupExempt_NoReason_Denies(t *testing.T) {
 	// Drop the backup label so we exercise the exempt-only path; the
 	// objectSelector in the cluster would not match this PVC, but the
 	// handler is defense-in-depth.
-	pvc.Labels = map[string]string{"backup-exempt": "true"}
+	pvc.Labels = map[string]string{backupExemptLabel: annotTrue}
 	kopia := &fakeKopia{}
 	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
 
@@ -258,7 +286,7 @@ func TestPVCValidate_BackupExempt_NoReason_Denies(t *testing.T) {
 
 func TestPVCValidate_BackupExempt_WithReason_Allows(t *testing.T) {
 	pvc := backupPVC("media")
-	pvc.Labels = map[string]string{"backup-exempt": "true"}
+	pvc.Labels = map[string]string{backupExemptLabel: annotTrue}
 	pvc.Annotations = map[string]string{
 		"storage.vanillax.dev/backup-exempt-reason": "cache",
 	}
@@ -286,8 +314,8 @@ func TestPVCValidate_BackupExempt_TakesPrecedenceOverBackupLabel(t *testing.T) {
 	// the backup label would otherwise require.
 	pvc := backupPVC("media")
 	pvc.Labels = map[string]string{
-		"backup":        "hourly",
-		"backup-exempt": "true",
+		backupLabelKey:    backupLabelHour,
+		backupExemptLabel: annotTrue,
 	}
 	pvc.Annotations = map[string]string{
 		"storage.vanillax.dev/backup-exempt-reason": "scratch",

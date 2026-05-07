@@ -307,12 +307,14 @@ func TestCleanup_IgnoresMissingCRD(t *testing.T) {
 }
 
 // labeledPVC builds a backup-labeled PVC with optional bind state and age.
-func labeledPVC(ns, name, label string, phase corev1.PersistentVolumeClaimPhase, age time.Duration) *corev1.PersistentVolumeClaim {
+// The namespace parameter was dropped after every call site converged on
+// testNamespace (unparam lint).
+func labeledPVC(label string, phase corev1.PersistentVolumeClaimPhase, age time.Duration) *corev1.PersistentVolumeClaim {
 	created := metav1.NewTime(time.Now().Add(-age))
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Namespace:         ns,
-			Name:              name,
+			Namespace:         testNamespace,
+			Name:              testPVCName,
 			Labels:            map[string]string{backupLabelKey: label},
 			CreationTimestamp: created,
 		},
@@ -331,7 +333,7 @@ func labeledPVC(ns, name, label string, phase corev1.PersistentVolumeClaimPhase,
 
 func TestReconcile_NotBound_Requeues30s(t *testing.T) {
 	scheme := newTestScheme(t)
-	pvc := labeledPVC(testNamespace, testPVCName, "hourly", corev1.ClaimPending, 0)
+	pvc := labeledPVC("hourly", corev1.ClaimPending, 0)
 
 	cli := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -357,7 +359,7 @@ func TestReconcile_NotBound_Requeues30s(t *testing.T) {
 func TestReconcile_BoundYoung_RequeuesUntilOld(t *testing.T) {
 	scheme := newTestScheme(t)
 	// Bound but only 30 minutes old → must wait another ~90m before backup.
-	pvc := labeledPVC(testNamespace, testPVCName, "daily", corev1.ClaimBound, 30*time.Minute)
+	pvc := labeledPVC("daily", corev1.ClaimBound, 30*time.Minute)
 
 	cli := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -388,7 +390,7 @@ func TestReconcile_BoundYoung_RequeuesUntilOld(t *testing.T) {
 
 func TestReconcile_BoundOld_CreatesAllThree(t *testing.T) {
 	scheme := newTestScheme(t)
-	pvc := labeledPVC(testNamespace, testPVCName, "hourly", corev1.ClaimBound, 3*time.Hour)
+	pvc := labeledPVC("hourly", corev1.ClaimBound, 3*time.Hour)
 
 	cli := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -471,7 +473,7 @@ func TestReconcile_BackupExempt_TriggersCleanup(t *testing.T) {
 	// PVC is backup-labeled (would normally produce children) AND
 	// backup-exempt=true (override → cleanup). Bound and old enough that
 	// the non-exempt path would have created all three children.
-	pvc := labeledPVC("app", "data", "hourly", corev1.ClaimBound, 3*time.Hour)
+	pvc := labeledPVC("hourly", corev1.ClaimBound, 3*time.Hour)
 	pvc.Labels[backupExemptLabel] = "true"
 
 	// Pre-existing children labeled by pvc-plumber from before exempt was
