@@ -73,10 +73,11 @@ var defaultSystemNamespaces = []string{
 	"1passwordconnect",
 }
 
-var (
-	scheme   = runtime.NewScheme()
-	setupLog = ctrl.Log.WithName("setup")
-)
+// scheme is the runtime scheme the manager + admission decoder use.
+// Phase 1 had a `setupLog` here too but the operator now logs through slog
+// for both the legacy HTTP path and the manager startup, so the named
+// controller-runtime logger has no callers.
+var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -283,7 +284,7 @@ func runManager(
 	// Admission webhook handlers. The decoder is built from the manager's
 	// scheme so it knows how to deserialize core/v1 PVC and batch/v1 Job
 	// payloads. All three handlers receive the same SystemNamespaces /
-	// shared cached backend, keeping behaviour identical between
+	// shared cached backend, keeping behavior identical between
 	// reconcile and admission paths.
 	decoder := admission.NewDecoder(mgr.GetScheme())
 	hookSrv := mgr.GetWebhookServer()

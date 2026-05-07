@@ -29,7 +29,7 @@ func TestPVCValidate_Unknown_Denies(t *testing.T) {
 	}}
 	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
 
-	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("blue", "media")))
+	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("media")))
 	if resp.Allowed {
 		t.Fatalf("expected denied on decision=unknown, got allowed")
 	}
@@ -46,7 +46,7 @@ func TestPVCValidate_Error_Denies(t *testing.T) {
 	}}
 	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
 
-	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("blue", "media")))
+	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("media")))
 	if resp.Allowed {
 		t.Fatalf("expected denied when result.Error set, got allowed")
 	}
@@ -59,7 +59,7 @@ func TestPVCValidate_NotAuthoritative_Denies(t *testing.T) {
 	}}
 	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
 
-	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("blue", "media")))
+	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("media")))
 	if resp.Allowed {
 		t.Fatalf("expected denied on non-authoritative result, got allowed")
 	}
@@ -77,7 +77,7 @@ func TestPVCValidate_RestoreNoDataSourceRef_Denies(t *testing.T) {
 	}}
 	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
 
-	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("blue", "media")))
+	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("media")))
 	if resp.Allowed {
 		t.Fatalf("expected denied when restore decision but no dataSourceRef")
 	}
@@ -96,7 +96,7 @@ func TestPVCValidate_RestoreWithCorrectDataSourceRef_Allows(t *testing.T) {
 	}}
 	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
 
-	pvc := withRestoreDataSourceRef(backupPVC("blue", "media"))
+	pvc := withRestoreDataSourceRef(backupPVC("media"))
 	resp := val.Handle(context.Background(), pvcRequest(t, pvc))
 	if !resp.Allowed {
 		t.Fatalf("expected allowed when restore + correct dataSourceRef, got denied: %s", resp.Result.Message)
@@ -143,7 +143,7 @@ func TestPVCValidate_RestoreWithWrongDataSourceRef_Denies(t *testing.T) {
 				Authoritative: true,
 			}}
 			val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
-			pvc := withRestoreDataSourceRef(backupPVC("blue", "media"))
+			pvc := withRestoreDataSourceRef(backupPVC("media"))
 			tc.mutate(pvc)
 
 			resp := val.Handle(context.Background(), pvcRequest(t, pvc))
@@ -161,15 +161,15 @@ func TestPVCValidate_FreshDecision_Allows(t *testing.T) {
 	}}
 	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
 
-	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("blue", "media")))
+	resp := val.Handle(context.Background(), pvcRequest(t, backupPVC("media")))
 	if !resp.Allowed {
 		t.Fatalf("expected allowed for fresh authoritative decision, got denied: %s", resp.Result.Message)
 	}
 }
 
 func TestPVCValidate_SkipRestoreNoReason_Denies(t *testing.T) {
-	pvc := backupPVC("blue", "media")
-	pvc.Annotations = map[string]string{"volsync.backup/skip-restore": "true"}
+	pvc := backupPVC("media")
+	pvc.Annotations = map[string]string{skipRestoreAnnot: annotTrue}
 	kopia := &fakeKopia{}
 	val := &PVCValidator{Decoder: newDecoder(t), Kopia: kopia}
 
@@ -187,10 +187,10 @@ func TestPVCValidate_SkipRestoreNoReason_Denies(t *testing.T) {
 }
 
 func TestPVCValidate_SkipRestoreWithReason_Allows(t *testing.T) {
-	pvc := backupPVC("blue", "media")
+	pvc := backupPVC("media")
 	pvc.Annotations = map[string]string{
-		"volsync.backup/skip-restore":        "true",
-		"volsync.backup/skip-restore-reason": "drill 2026-05-01",
+		skipRestoreAnnot:       annotTrue,
+		skipRestoreReasonAnnot: "drill 2026-05-01",
 	}
 	// Even if kopia would have denied, skip-restore=true with a reason
 	// short-circuits past the gate. This is the documented escape hatch.
@@ -211,7 +211,7 @@ func TestPVCValidate_SkipRestoreWithReason_Allows(t *testing.T) {
 }
 
 func TestPVCValidate_SystemNamespace_Allows(t *testing.T) {
-	pvc := backupPVC("blue", "kube-system")
+	pvc := backupPVC("kube-system")
 	kopia := &fakeKopia{result: backend.CheckResult{
 		// Even an unknown decision wouldn't deny — system namespace skips first.
 		Decision:      backend.DecisionUnknown,
@@ -233,7 +233,7 @@ func TestPVCValidate_SystemNamespace_Allows(t *testing.T) {
 }
 
 func TestPVCValidate_NoBackupLabel_Allows(t *testing.T) {
-	pvc := backupPVC("blue", "media")
+	pvc := backupPVC("media")
 	pvc.Labels = nil
 	kopia := &fakeKopia{result: backend.CheckResult{
 		Decision: backend.DecisionUnknown, // would otherwise deny

@@ -21,6 +21,30 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+// Test fixture constants. Centralized so the table-driven tests, the
+// per-helper assertions, and the schedule-formula sanity checks all line up
+// on the same canonical values. Keeping them as consts also satisfies the
+// goconst linter, which counts repeated literals across the whole package.
+const (
+	// testNamespace is the canonical namespace every reconcile happy-path
+	// test runs in. mustExist used to take a namespace parameter that
+	// always received this value (unparam); the parameter was dropped.
+	testNamespace = "app"
+
+	// testPVCName is the canonical backup-labeled PVC name used across
+	// the reconcile and cleanup tests.
+	testPVCName = "data"
+
+	// testRSDestName is the conventional <pvc>-backup name pvc-plumber
+	// gives the companion ReplicationSource AND ReplicationDestination
+	// objects. Computed once instead of pasting "data-backup" everywhere.
+	testRSDestName = testPVCName + "-backup"
+
+	// testESName is the conventional volsync-<pvc> name pvc-plumber
+	// gives the companion ExternalSecret.
+	testESName = "volsync-" + testPVCName
+)
+
 // newTestScheme builds a scheme that knows both core/v1 and the unstructured
 // child kinds. The fake client refuses to operate on a GVK its scheme has
 // never heard of, so we register the singular + List variants for each
@@ -68,7 +92,7 @@ func TestBackupSchedule_HourlyDaily(t *testing.T) {
 		// "ns-pvc" → 6 chars → minute 6
 		{ns: "ns", pvc: "pvc", wantHour: "6 * * * *", wantDay: "6 2 * * *"},
 		// "default-data" → 12 chars → minute 12
-		{ns: "default", pvc: "data", wantHour: "12 * * * *", wantDay: "12 2 * * *"},
+		{ns: "default", pvc: testPVCName, wantHour: "12 * * * *", wantDay: "12 2 * * *"},
 		// 60-char joined string → minute 0
 		{
 			ns:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 30
@@ -100,14 +124,14 @@ func TestBackupSchedule_HourlyDaily(t *testing.T) {
 
 func TestCleanup_DeletesAllByLabel(t *testing.T) {
 	scheme := newTestScheme(t)
-	ns := "app"
-	pvcName := "data"
+	ns := testNamespace
+	pvcName := testPVCName
 
-	es := childObject(esGVK, ns, "volsync-data", pvcName)
-	rs := childObject(rsGVK, ns, "data-backup", pvcName)
-	rd := childObject(rdGVK, ns, "data-backup", pvcName)
+	es := childObject(esGVK, ns, testESName, pvcName)
+	rs := childObject(rsGVK, ns, testRSDestName, pvcName)
+	rd := childObject(rdGVK, ns, testRSDestName, pvcName)
 	// Decoy in another namespace and another pvcName — must NOT be deleted.
-	decoyNS := childObject(esGVK, "other", "volsync-data", pvcName)
+	decoyNS := childObject(esGVK, "other", testESName, pvcName)
 	decoyName := childObject(esGVK, ns, "volsync-other", "other")
 
 	cli := fake.NewClientBuilder().
@@ -125,9 +149,9 @@ func TestCleanup_DeletesAllByLabel(t *testing.T) {
 		gvk  schema.GroupVersionKind
 		name string
 	}{
-		{esGVK, "volsync-data"},
-		{rsGVK, "data-backup"},
-		{rdGVK, "data-backup"},
+		{esGVK, testESName},
+		{rsGVK, testRSDestName},
+		{rdGVK, testRSDestName},
 	} {
 		got := &unstructured.Unstructured{}
 		got.SetGroupVersionKind(want.gvk)
@@ -140,7 +164,7 @@ func TestCleanup_DeletesAllByLabel(t *testing.T) {
 	// The decoys must survive.
 	gotDecoyNS := &unstructured.Unstructured{}
 	gotDecoyNS.SetGroupVersionKind(esGVK)
-	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: "other", Name: "volsync-data"}, gotDecoyNS); err != nil {
+	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: "other", Name: testESName}, gotDecoyNS); err != nil {
 		t.Errorf("cross-namespace decoy was deleted: %v", err)
 	}
 	gotDecoyName := &unstructured.Unstructured{}
@@ -211,7 +235,7 @@ func TestCleanup_IgnoresMissingCRD(t *testing.T) {
 	}
 
 	r := &PVCReconciler{Client: wrapper}
-	if err := r.cleanup(context.Background(), "app", "data"); err != nil {
+	if err := r.cleanup(context.Background(), testNamespace, testPVCName); err != nil {
 		t.Fatalf("cleanup on cluster with missing CRDs errored: %v (want nil — bootstrap path)", err)
 	}
 }
@@ -241,7 +265,7 @@ func labeledPVC(ns, name, label string, phase corev1.PersistentVolumeClaimPhase,
 
 func TestReconcile_NotBound_Requeues30s(t *testing.T) {
 	scheme := newTestScheme(t)
-	pvc := labeledPVC("app", "data", "hourly", corev1.ClaimPending, 0)
+	pvc := labeledPVC(testNamespace, testPVCName, "hourly", corev1.ClaimPending, 0)
 
 	cli := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -249,7 +273,7 @@ func TestReconcile_NotBound_Requeues30s(t *testing.T) {
 		Build()
 	r := &PVCReconciler{Client: cli}
 
-	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app", Name: "data"}})
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}})
 	if err != nil {
 		t.Fatalf("reconcile errored: %v", err)
 	}
@@ -259,15 +283,15 @@ func TestReconcile_NotBound_Requeues30s(t *testing.T) {
 
 	// ES + RD should have been created even though the PVC isn't bound;
 	// only RS is gated on Bound+age.
-	mustExist(t, cli, esGVK, "app", "volsync-data")
-	mustExist(t, cli, rdGVK, "app", "data-backup")
-	mustNotExist(t, cli, rsGVK, "app", "data-backup")
+	mustExist(t, cli, esGVK, testESName)
+	mustExist(t, cli, rdGVK, testRSDestName)
+	mustNotExist(t, cli, rsGVK, testRSDestName)
 }
 
 func TestReconcile_BoundYoung_RequeuesUntilOld(t *testing.T) {
 	scheme := newTestScheme(t)
 	// Bound but only 30 minutes old → must wait another ~90m before backup.
-	pvc := labeledPVC("app", "data", "daily", corev1.ClaimBound, 30*time.Minute)
+	pvc := labeledPVC(testNamespace, testPVCName, "daily", corev1.ClaimBound, 30*time.Minute)
 
 	cli := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -275,7 +299,7 @@ func TestReconcile_BoundYoung_RequeuesUntilOld(t *testing.T) {
 		Build()
 	r := &PVCReconciler{Client: cli}
 
-	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app", Name: "data"}})
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}})
 	if err != nil {
 		t.Fatalf("reconcile errored: %v", err)
 	}
@@ -291,14 +315,14 @@ func TestReconcile_BoundYoung_RequeuesUntilOld(t *testing.T) {
 	}
 
 	// ES + RD must exist; RS must not (still in age gate).
-	mustExist(t, cli, esGVK, "app", "volsync-data")
-	mustExist(t, cli, rdGVK, "app", "data-backup")
-	mustNotExist(t, cli, rsGVK, "app", "data-backup")
+	mustExist(t, cli, esGVK, testESName)
+	mustExist(t, cli, rdGVK, testRSDestName)
+	mustNotExist(t, cli, rsGVK, testRSDestName)
 }
 
 func TestReconcile_BoundOld_CreatesAllThree(t *testing.T) {
 	scheme := newTestScheme(t)
-	pvc := labeledPVC("app", "data", "hourly", corev1.ClaimBound, 3*time.Hour)
+	pvc := labeledPVC(testNamespace, testPVCName, "hourly", corev1.ClaimBound, 3*time.Hour)
 
 	cli := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -306,7 +330,7 @@ func TestReconcile_BoundOld_CreatesAllThree(t *testing.T) {
 		Build()
 	r := &PVCReconciler{Client: cli}
 
-	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app", Name: "data"}})
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}})
 	if err != nil {
 		t.Fatalf("reconcile errored: %v", err)
 	}
@@ -314,21 +338,21 @@ func TestReconcile_BoundOld_CreatesAllThree(t *testing.T) {
 		t.Errorf("RequeueAfter = %v, want 0 (steady state)", res.RequeueAfter)
 	}
 
-	mustExist(t, cli, esGVK, "app", "volsync-data")
-	mustExist(t, cli, rdGVK, "app", "data-backup")
-	mustExist(t, cli, rsGVK, "app", "data-backup")
+	mustExist(t, cli, esGVK, testESName)
+	mustExist(t, cli, rdGVK, testRSDestName)
+	mustExist(t, cli, rsGVK, testRSDestName)
 
 	// Spot-check labels and a representative spec field on the RS, since
 	// that's the resource whose schedule is the trickiest port.
 	rs := &unstructured.Unstructured{}
 	rs.SetGroupVersionKind(rsGVK)
-	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: "app", Name: "data-backup"}, rs); err != nil {
+	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testRSDestName}, rs); err != nil {
 		t.Fatalf("get RS: %v", err)
 	}
 	if v := rs.GetLabels()[managedByLabel]; v != managedByValue {
 		t.Errorf("RS missing managed-by label, got %q", v)
 	}
-	if v := rs.GetLabels()[pvcLabel]; v != "data" {
+	if v := rs.GetLabels()[pvcLabel]; v != testPVCName {
 		t.Errorf("RS missing pvc label, got %q", v)
 	}
 	schedule, _, err := unstructured.NestedString(rs.Object, "spec", "trigger", "schedule")
@@ -341,24 +365,26 @@ func TestReconcile_BoundOld_CreatesAllThree(t *testing.T) {
 	}
 }
 
-// mustExist fails the test if a child of the given GVK is absent.
-func mustExist(t *testing.T, cli client.Client, gvk schema.GroupVersionKind, namespace, name string) {
+// mustExist fails the test if a child of the given GVK is absent in
+// testNamespace. The namespace parameter was dropped after every call site
+// converged on testNamespace ("app") — unparam linter.
+func mustExist(t *testing.T, cli client.Client, gvk schema.GroupVersionKind, name string) {
 	t.Helper()
 	got := &unstructured.Unstructured{}
 	got.SetGroupVersionKind(gvk)
-	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, got); err != nil {
-		t.Errorf("expected %s %s/%s to exist, got err=%v", gvk.Kind, namespace, name, err)
+	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: name}, got); err != nil {
+		t.Errorf("expected %s %s/%s to exist, got err=%v", gvk.Kind, testNamespace, name, err)
 	}
 }
 
-// mustNotExist fails if the object is present.
-func mustNotExist(t *testing.T, cli client.Client, gvk schema.GroupVersionKind, namespace, name string) {
+// mustNotExist fails if the object is present in testNamespace.
+func mustNotExist(t *testing.T, cli client.Client, gvk schema.GroupVersionKind, name string) {
 	t.Helper()
 	got := &unstructured.Unstructured{}
 	got.SetGroupVersionKind(gvk)
-	err := cli.Get(context.Background(), types.NamespacedName{Namespace: namespace, Name: name}, got)
+	err := cli.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: name}, got)
 	if !apierrors.IsNotFound(err) {
-		t.Errorf("expected %s %s/%s to be absent, got err=%v", gvk.Kind, namespace, name, err)
+		t.Errorf("expected %s %s/%s to be absent, got err=%v", gvk.Kind, testNamespace, name, err)
 	}
 }
 

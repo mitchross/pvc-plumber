@@ -58,7 +58,7 @@ func (h *JobMutator) Handle(_ context.Context, req admission.Request) admission.
 	// Idempotent no-op: if the operator (or a previous admission pass)
 	// already wired the repository volume, leave the spec alone. This
 	// prevents duplicate volume entries and matches the strategic-merge
-	// behaviour of the Kyverno policy this replaces.
+	// behavior of the Kyverno policy this replaces.
 	for _, vol := range job.Spec.Template.Spec.Volumes {
 		if vol.Name == repositoryVolumeName {
 			return admission.Allowed("")

@@ -36,6 +36,15 @@ const (
 	backupLabelKey = "backup"
 	backupHourly   = "hourly"
 	backupDaily    = "daily"
+
+	// dataField is the literal field name `data` used as a key in the
+	// unstructured ExternalSecret spec we render — it appears both inside
+	// `spec.target.template.data` (the rendered Secret payload key/value
+	// map) and at `spec.data` (the list of remoteRef rules). Both are
+	// the ES CRD's documented field names; kept as one constant since
+	// they're identical strings and goconst treats them as one occurrence
+	// set.
+	dataField = "data"
 )
 
 // GVKs for the three child kinds. We use unstructured everywhere so the
@@ -196,13 +205,13 @@ func (r *PVCReconciler) ensureExternalSecret(ctx context.Context, pvc *corev1.Pe
 						pvcLabel:       pvc.Name,
 					},
 				},
-				"data": map[string]interface{}{
+				dataField: map[string]interface{}{
 					"KOPIA_REPOSITORY": "filesystem:///repository",
 					"KOPIA_FS_PATH":    "/repository",
 				},
 			},
 		},
-		"data": []interface{}{
+		dataField: []interface{}{
 			map[string]interface{}{
 				"secretKey": "KOPIA_PASSWORD",
 				"remoteRef": map[string]interface{}{

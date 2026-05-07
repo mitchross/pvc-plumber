@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// testStagingNS is the example site-local namespace used across the additive-
+// behavior subtests. Realistic shape (lowercase, dashed) is enough to catch
+// the trim/split cases without needing variety per case.
+const testStagingNS = "staging-infra"
+
 // TestParseSystemNamespaces_AlwaysSeedsDefaults locks in the load-bearing
 // invariant from S2: the 9-entry defaultSystemNamespaces list must always be
 // present in the result, regardless of what (if anything) the SYSTEM_NAMESPACES
@@ -30,18 +35,18 @@ func TestParseSystemNamespaces_AlwaysSeedsDefaults(t *testing.T) {
 		},
 		{
 			name:      "single extra ns adds without losing defaults",
-			raw:       "staging-infra",
-			wantExtra: []string{"staging-infra"},
+			raw:       testStagingNS,
+			wantExtra: []string{testStagingNS},
 		},
 		{
 			name:      "multiple extras add to defaults",
-			raw:       "staging-infra,prod-tools,monitoring",
-			wantExtra: []string{"staging-infra", "prod-tools", "monitoring"},
+			raw:       testStagingNS + ",prod-tools,monitoring",
+			wantExtra: []string{testStagingNS, "prod-tools", "monitoring"},
 		},
 		{
 			name:      "extras with whitespace are trimmed",
-			raw:       " staging-infra , prod-tools ,  ,monitoring",
-			wantExtra: []string{"staging-infra", "prod-tools", "monitoring"},
+			raw:       " " + testStagingNS + " , prod-tools ,  ,monitoring",
+			wantExtra: []string{testStagingNS, "prod-tools", "monitoring"},
 		},
 		{
 			name: "env entry duplicating a default is harmless (set semantics)",

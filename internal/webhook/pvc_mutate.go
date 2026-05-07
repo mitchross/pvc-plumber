@@ -39,6 +39,12 @@ const (
 	dataSourceAPIGroup = "volsync.backube"
 	dataSourceKind     = "ReplicationDestination"
 	dataSourceSuffix   = "-backup"
+
+	// annotTrue is the canonical "active" value for boolean-like
+	// annotations/labels in this package (skipRestoreAnnot, future
+	// backup-exempt label, etc.). Centralizing the literal makes it
+	// trivial to grep for opt-out call sites and keeps goconst quiet.
+	annotTrue = "true"
 )
 
 // hasBackupLabel returns true if the PVC carries `backup=hourly|daily`. The
@@ -62,7 +68,7 @@ func hasBackupLabel(pvc *corev1.PersistentVolumeClaim) bool {
 // Failure mode: fail-OPEN. If the Kopia check errors out or returns a
 // non-authoritative result, this mutator admits the PVC unchanged and lets
 // the validator (PVCValidator) make the final fail-CLOSED decision. Doing it
-// this way matches the Kyverno behaviour and keeps the mutate webhook from
+// this way matches the Kyverno behavior and keeps the mutate webhook from
 // blocking creates over transient plumber flakiness — the validator is the
 // safety gate.
 type PVCMutator struct {
@@ -88,7 +94,7 @@ func (h *PVCMutator) Handle(ctx context.Context, req admission.Request) admissio
 	if !hasBackupLabel(pvc) {
 		return admission.Allowed("")
 	}
-	if pvc.Annotations[skipRestoreAnnot] == "true" {
+	if pvc.Annotations[skipRestoreAnnot] == annotTrue {
 		return admission.Allowed("")
 	}
 	if _, ok := h.SystemNamespaces[pvc.Namespace]; ok {

@@ -16,6 +16,11 @@ import (
 const (
 	testNFSServer = "192.168.10.133"
 	testNFSPath   = "/mnt/BigTank/k8s/volsync-kopia-nfs"
+
+	// kopiaContainerName is the name VolSync gives the Kopia mover
+	// container in mover Job pods. Reused across mutation, no-op, and
+	// idempotency tests to keep them representative of the real shape.
+	kopiaContainerName = "kopia"
 )
 
 func volsyncJob(name string, containers []corev1.Container) *batchv1.Job {
@@ -52,7 +57,7 @@ func jobRequest(t *testing.T, job *batchv1.Job) admission.Request {
 
 func TestJobMutate_VolsyncJob_InjectsVolumeAndMounts(t *testing.T) {
 	job := volsyncJob("backup-1", []corev1.Container{
-		{Name: "kopia", Image: "kopia:latest"},
+		{Name: kopiaContainerName, Image: "kopia:latest"},
 	})
 	mut := &JobMutator{Decoder: newDecoder(t), NFSServer: testNFSServer, NFSPath: testNFSPath}
 
@@ -74,12 +79,12 @@ func TestJobMutate_VolsyncJob_InjectsVolumeAndMounts(t *testing.T) {
 	// Volume injected once, with NFS source.
 	var found bool
 	for _, v := range got.Spec.Template.Spec.Volumes {
-		if v.Name != "repository" {
+		if v.Name != repositoryVolumeName {
 			continue
 		}
 		found = true
 		if v.NFS == nil {
-			t.Fatalf("expected NFS volume source on `repository` volume")
+			t.Fatalf("expected NFS volume source on %q volume", repositoryVolumeName)
 		}
 		if v.NFS.Server != testNFSServer {
 			t.Errorf("NFS.Server: want %q, got %q", testNFSServer, v.NFS.Server)
@@ -89,7 +94,7 @@ func TestJobMutate_VolsyncJob_InjectsVolumeAndMounts(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("expected `repository` volume in patched spec")
+		t.Fatalf("expected %q volume in patched spec", repositoryVolumeName)
 	}
 
 	// Mount appended to every container.
@@ -100,7 +105,7 @@ func TestJobMutate_VolsyncJob_InjectsVolumeAndMounts(t *testing.T) {
 	if len(mounts) != 1 {
 		t.Fatalf("expected 1 mount, got %d", len(mounts))
 	}
-	if mounts[0].Name != "repository" || mounts[0].MountPath != "/repository" {
+	if mounts[0].Name != repositoryVolumeName || mounts[0].MountPath != repositoryMountPath {
 		t.Errorf("unexpected mount: %+v", mounts[0])
 	}
 }
@@ -122,10 +127,10 @@ func TestJobMutate_NotVolsync_NoOp(t *testing.T) {
 func TestJobMutate_RepositoryVolumeAlreadyExists_NoOp(t *testing.T) {
 	// Idempotency: a re-fired admission (or operator-curated Job) that
 	// already has the volume must NOT have it duplicated.
-	job := volsyncJob("backup-1", []corev1.Container{{Name: "kopia"}})
+	job := volsyncJob("backup-1", []corev1.Container{{Name: kopiaContainerName}})
 	job.Spec.Template.Spec.Volumes = []corev1.Volume{
 		{
-			Name: "repository",
+			Name: repositoryVolumeName,
 			VolumeSource: corev1.VolumeSource{
 				NFS: &corev1.NFSVolumeSource{Server: testNFSServer, Path: testNFSPath},
 			},
@@ -147,7 +152,7 @@ func TestJobMutate_MultipleContainers_AllGetMount(t *testing.T) {
 	// and Kopia operates on /repository regardless of which container reads
 	// it — every container needs the mount.
 	job := volsyncJob("backup-1", []corev1.Container{
-		{Name: "kopia"},
+		{Name: kopiaContainerName},
 		{Name: "sidecar-metrics"},
 		{Name: "sidecar-logs", VolumeMounts: []corev1.VolumeMount{{Name: "logs", MountPath: "/logs"}}},
 	})
@@ -168,13 +173,13 @@ func TestJobMutate_MultipleContainers_AllGetMount(t *testing.T) {
 	for _, c := range got.Spec.Template.Spec.Containers {
 		var hasRepo bool
 		for _, m := range c.VolumeMounts {
-			if m.Name == "repository" && m.MountPath == "/repository" {
+			if m.Name == repositoryVolumeName && m.MountPath == repositoryMountPath {
 				hasRepo = true
 				break
 			}
 		}
 		if !hasRepo {
-			t.Errorf("container %q missing /repository mount; mounts=%+v", c.Name, c.VolumeMounts)
+			t.Errorf("container %q missing %s mount; mounts=%+v", c.Name, repositoryMountPath, c.VolumeMounts)
 		}
 	}
 

@@ -84,7 +84,7 @@ func (h *PVCValidator) Handle(ctx context.Context, req admission.Request) admiss
 
 	// skip-restore is the explicit "nuke and start fresh" escape hatch. It
 	// disables the rest of the gate, so we require an audit trail (rule 4).
-	if pvc.Annotations[skipRestoreAnnot] == "true" {
+	if pvc.Annotations[skipRestoreAnnot] == annotTrue {
 		if pvc.Annotations[skipRestoreReasonAnnot] == "" {
 			return admission.Denied(denyMsgSkipRestoreNoReason)
 		}
@@ -93,7 +93,7 @@ func (h *PVCValidator) Handle(ctx context.Context, req admission.Request) admiss
 
 	result := h.Kopia.CheckBackupExists(ctx, pvc.Namespace, pvc.Name)
 
-	// Rule 1 fail-closed: any flavour of "we don't know" denies. Note
+	// Rule 1 fail-closed: any flavor of "we don't know" denies. Note
 	// `Decision == DecisionUnknown` is a deliberate triple-check alongside
 	// `!Authoritative` and a non-empty Error — backends can populate any
 	// subset of those fields, and we want all three paths to converge on

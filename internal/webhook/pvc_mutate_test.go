@@ -56,14 +56,23 @@ func pvcRequest(t *testing.T, pvc *corev1.PersistentVolumeClaim) admission.Reque
 	}
 }
 
-func backupPVC(name, ns string) *corev1.PersistentVolumeClaim {
+// testBackupPVCName is the canonical PVC name used in mutator and validator
+// tests. Kept short and not visually similar to "data" / "backup" / etc. so
+// log output reads cleanly. Every backupPVC() call uses this — the helper
+// previously took a `name` parameter that always received "blue" (unparam).
+const testBackupPVCName = "blue"
+
+// backupPVC builds a backup-labeled PVC in the given namespace using the
+// shared testBackupPVCName. The name parameter was dropped after every call
+// site converged on "blue".
+func backupPVC(ns string) *corev1.PersistentVolumeClaim {
 	return &corev1.PersistentVolumeClaim{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
 			Kind:       "PersistentVolumeClaim",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      testBackupPVCName,
 			Namespace: ns,
 			Labels:    map[string]string{"backup": "hourly"},
 		},
@@ -93,7 +102,7 @@ func applyPatch(t *testing.T, original []byte, patches []jsonpatchgomod.JsonPatc
 }
 
 func TestPVCMutate_RestoreDecision_PatchesDataSourceRef(t *testing.T) {
-	pvc := backupPVC("blue", "media")
+	pvc := backupPVC("media")
 	kopia := &fakeKopia{result: backend.CheckResult{
 		Exists:        true,
 		Decision:      backend.DecisionRestore,
@@ -136,7 +145,7 @@ func TestPVCMutate_FreshDecision_NoPatch(t *testing.T) {
 	}}
 	mut := &PVCMutator{Decoder: newDecoder(t), Kopia: kopia}
 
-	resp := mut.Handle(context.Background(), pvcRequest(t, backupPVC("blue", "media")))
+	resp := mut.Handle(context.Background(), pvcRequest(t, backupPVC("media")))
 	if !resp.Allowed {
 		t.Fatalf("expected allowed=true on fresh decision")
 	}
@@ -155,7 +164,7 @@ func TestPVCMutate_KopiaError_AllowsFailOpen(t *testing.T) {
 	}}
 	mut := &PVCMutator{Decoder: newDecoder(t), Kopia: kopia}
 
-	resp := mut.Handle(context.Background(), pvcRequest(t, backupPVC("blue", "media")))
+	resp := mut.Handle(context.Background(), pvcRequest(t, backupPVC("media")))
 	if !resp.Allowed {
 		t.Fatalf("expected allowed=true on kopia error (fail-open), got denied: %v", resp.Result)
 	}
@@ -165,7 +174,7 @@ func TestPVCMutate_KopiaError_AllowsFailOpen(t *testing.T) {
 }
 
 func TestPVCMutate_DataSourceRefAlreadySet_NoOverwrite(t *testing.T) {
-	pvc := backupPVC("blue", "media")
+	pvc := backupPVC("media")
 	pvc.Spec.DataSourceRef = &corev1.TypedObjectReference{
 		APIGroup: ptr.To("snapshot.storage.k8s.io"),
 		Kind:     "VolumeSnapshot",
@@ -193,7 +202,7 @@ func TestPVCMutate_DataSourceRefAlreadySet_NoOverwrite(t *testing.T) {
 }
 
 func TestPVCMutate_NoBackupLabel_AllowsWithoutCheck(t *testing.T) {
-	pvc := backupPVC("blue", "media")
+	pvc := backupPVC("media")
 	pvc.Labels = nil
 	kopia := &fakeKopia{}
 	mut := &PVCMutator{Decoder: newDecoder(t), Kopia: kopia}
@@ -208,7 +217,7 @@ func TestPVCMutate_NoBackupLabel_AllowsWithoutCheck(t *testing.T) {
 }
 
 func TestPVCMutate_SystemNamespace_AllowsWithoutCheck(t *testing.T) {
-	pvc := backupPVC("blue", "kube-system")
+	pvc := backupPVC("kube-system")
 	kopia := &fakeKopia{}
 	mut := &PVCMutator{
 		Decoder:          newDecoder(t),
@@ -226,8 +235,8 @@ func TestPVCMutate_SystemNamespace_AllowsWithoutCheck(t *testing.T) {
 }
 
 func TestPVCMutate_SkipRestore_AllowsWithoutCheck(t *testing.T) {
-	pvc := backupPVC("blue", "media")
-	pvc.Annotations = map[string]string{"volsync.backup/skip-restore": "true"}
+	pvc := backupPVC("media")
+	pvc.Annotations = map[string]string{skipRestoreAnnot: annotTrue}
 	kopia := &fakeKopia{}
 	mut := &PVCMutator{Decoder: newDecoder(t), Kopia: kopia}
 
@@ -241,7 +250,7 @@ func TestPVCMutate_SkipRestore_AllowsWithoutCheck(t *testing.T) {
 }
 
 func TestPVCMutate_NonCreate_AllowsImmediately(t *testing.T) {
-	pvc := backupPVC("blue", "media")
+	pvc := backupPVC("media")
 	raw, _ := json.Marshal(pvc)
 	req := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
 		Operation: admissionv1.Update,
