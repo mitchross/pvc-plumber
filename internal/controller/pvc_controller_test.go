@@ -44,6 +44,17 @@ const (
 	// testESName is the conventional volsync-<pvc> name pvc-plumber
 	// gives the companion ExternalSecret.
 	testESName = "volsync-" + testPVCName
+
+	// testStoreName / testVaultKey / testKopiaPwProp pin the ES rendering
+	// fixture values so goconst doesn't complain when they appear in both
+	// the ExternalSecretConfig builder and the assertion expressions.
+	testStoreName    = "1password"
+	testVaultKey     = "rustfs"
+	testKopiaPwProp  = "kopia_password"
+	testS3AccessProp = "k8s-admin-access-key"
+	testS3SecretProp = "k8s-admin-secret-key"
+	testS3Endpoint   = "http://192.168.10.133:30293"
+	testS3Bucket     = "volsync-kopia"
 )
 
 // newTestScheme builds a scheme that knows both core/v1 and the unstructured
@@ -80,6 +91,31 @@ func childObject(gvk schema.GroupVersionKind, namespace, name, pvcName string) *
 		pvcLabel:       pvcName,
 	})
 	return u
+}
+
+// testExternalSecretConfig returns a representative ExternalSecretConfig for
+// tests. Mirrors what cmd/operator/main.go produces from default env vars on
+// the reference cluster. Centralizing the literals here keeps the new ES
+// shape assertions in TestEnsureExternalSecret_RendersS3Shape readable
+// without inlining the same six strings every test.
+func testExternalSecretConfig() ExternalSecretConfig {
+	return ExternalSecretConfig{
+		SecretStoreName:       testStoreName,
+		VaultKey:              testVaultKey,
+		KopiaPasswordProperty: testKopiaPwProp,
+		S3AccessKeyProperty:   testS3AccessProp,
+		S3SecretKeyProperty:   testS3SecretProp,
+		S3Endpoint:            testS3Endpoint,
+		S3Bucket:              testS3Bucket,
+		S3DisableTLS:          true,
+	}
+}
+
+// newTestReconciler wraps the fake-client + ExternalSecretConfig boilerplate
+// so the call sites in this file all get the same default rendering knobs.
+// Tests that need a different config can construct a PVCReconciler by hand.
+func newTestReconciler(cli client.Client) *PVCReconciler {
+	return &PVCReconciler{Client: cli, ExternalSecret: testExternalSecretConfig()}
 }
 
 func TestBackupSchedule_HourlyDaily(t *testing.T) {
@@ -204,7 +240,7 @@ func TestCleanup_DeletesAllByLabel(t *testing.T) {
 		WithScheme(scheme).
 		WithObjects(es, rs, rd, decoyNS, decoyName).
 		Build()
-	r := &PVCReconciler{Client: cli}
+	r := newTestReconciler(cli)
 
 	if err := r.cleanup(context.Background(), ns, pvcName); err != nil {
 		t.Fatalf("cleanup returned error: %v", err)
@@ -243,7 +279,7 @@ func TestCleanup_DeletesAllByLabel(t *testing.T) {
 func TestCleanup_IgnoresNotFound(t *testing.T) {
 	scheme := newTestScheme(t)
 	cli := fake.NewClientBuilder().WithScheme(scheme).Build()
-	r := &PVCReconciler{Client: cli}
+	r := newTestReconciler(cli)
 
 	// Empty cluster, nothing to delete — must be a clean no-op.
 	if err := r.cleanup(context.Background(), "any", "missing"); err != nil {
@@ -300,7 +336,7 @@ func TestCleanup_IgnoresMissingCRD(t *testing.T) {
 		t.Fatalf("test setup is wrong: wrapper error %T %v is not classified as NoMatchError", probeErr, probeErr)
 	}
 
-	r := &PVCReconciler{Client: wrapper}
+	r := newTestReconciler(wrapper)
 	if err := r.cleanup(context.Background(), testNamespace, testPVCName); err != nil {
 		t.Fatalf("cleanup on cluster with missing CRDs errored: %v (want nil — bootstrap path)", err)
 	}
@@ -339,7 +375,7 @@ func TestReconcile_NotBound_Requeues30s(t *testing.T) {
 		WithScheme(scheme).
 		WithObjects(pvc).
 		Build()
-	r := &PVCReconciler{Client: cli}
+	r := newTestReconciler(cli)
 
 	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}})
 	if err != nil {
@@ -365,7 +401,7 @@ func TestReconcile_BoundYoung_RequeuesUntilOld(t *testing.T) {
 		WithScheme(scheme).
 		WithObjects(pvc).
 		Build()
-	r := &PVCReconciler{Client: cli}
+	r := newTestReconciler(cli)
 
 	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}})
 	if err != nil {
@@ -396,7 +432,7 @@ func TestReconcile_BoundOld_CreatesAllThree(t *testing.T) {
 		WithScheme(scheme).
 		WithObjects(pvc).
 		Build()
-	r := &PVCReconciler{Client: cli}
+	r := newTestReconciler(cli)
 
 	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}})
 	if err != nil {
@@ -474,21 +510,21 @@ func TestReconcile_BackupExempt_TriggersCleanup(t *testing.T) {
 	// backup-exempt=true (override → cleanup). Bound and old enough that
 	// the non-exempt path would have created all three children.
 	pvc := labeledPVC("hourly", corev1.ClaimBound, 3*time.Hour)
-	pvc.Labels[backupExemptLabel] = "true"
+	pvc.Labels[backupExemptLabel] = labelTrue
 
 	// Pre-existing children labeled by pvc-plumber from before exempt was
 	// added. Reconcile must reap them.
-	es := childObject(esGVK, "app", "volsync-data", "data")
-	rs := childObject(rsGVK, "app", "data-backup", "data")
-	rd := childObject(rdGVK, "app", "data-backup", "data")
+	es := childObject(esGVK, testNamespace, testESName, testPVCName)
+	rs := childObject(rsGVK, testNamespace, testRSDestName, testPVCName)
+	rd := childObject(rdGVK, testNamespace, testRSDestName, testPVCName)
 
 	cli := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(pvc, es, rs, rd).
 		Build()
-	r := &PVCReconciler{Client: cli}
+	r := newTestReconciler(cli)
 
-	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "app", Name: "data"}})
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}})
 	if err != nil {
 		t.Fatalf("reconcile errored: %v", err)
 	}
@@ -497,7 +533,223 @@ func TestReconcile_BackupExempt_TriggersCleanup(t *testing.T) {
 	}
 
 	// All three children must have been reaped.
-	mustNotExist(t, cli, esGVK, "volsync-data")
-	mustNotExist(t, cli, rsGVK, "data-backup")
-	mustNotExist(t, cli, rdGVK, "data-backup")
+	mustNotExist(t, cli, esGVK, testESName)
+	mustNotExist(t, cli, rsGVK, testRSDestName)
+	mustNotExist(t, cli, rdGVK, testRSDestName)
+}
+
+// TestEnsureExternalSecret_RendersS3Shape pins the v3.0.0 ES template:
+//   - secretStoreRef is configurable (was hardcoded `1password`).
+//   - target.template.data carries the four S3 env vars (KOPIA_REPOSITORY=
+//     s3://<bucket>, KOPIA_S3_ENDPOINT, KOPIA_S3_BUCKET, KOPIA_S3_DISABLE_TLS).
+//   - data[] carries three remoteRefs (KOPIA_PASSWORD, AWS_ACCESS_KEY_ID,
+//     AWS_SECRET_ACCESS_KEY), each pointing at the configurable vault key
+//     and configurable per-property name.
+//
+// Regression catch: the v2.x shape (filesystem:///repository, single
+// KOPIA_PASSWORD entry) MUST NOT appear anywhere in the rendered object.
+func TestEnsureExternalSecret_RendersS3Shape(t *testing.T) {
+	scheme := newTestScheme(t)
+	pvc := labeledPVC("hourly", corev1.ClaimBound, 3*time.Hour)
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+	r := newTestReconciler(cli)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}}); err != nil {
+		t.Fatalf("reconcile errored: %v", err)
+	}
+
+	es := &unstructured.Unstructured{}
+	es.SetGroupVersionKind(esGVK)
+	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testESName}, es); err != nil {
+		t.Fatalf("get ES: %v", err)
+	}
+
+	// secretStoreRef.name picks up the configurable store name.
+	storeName, _, err := unstructured.NestedString(es.Object, "spec", "secretStoreRef", "name")
+	if err != nil {
+		t.Fatalf("read secretStoreRef.name: %v", err)
+	}
+	if storeName != "1password" {
+		t.Errorf("secretStoreRef.name = %q, want %q", storeName, "1password")
+	}
+
+	// deletionPolicy must be Retain so a deleted ES doesn't drag the rendered
+	// Secret with it (mover Jobs may still need it).
+	dp, _, err := unstructured.NestedString(es.Object, "spec", "target", "deletionPolicy")
+	if err != nil {
+		t.Fatalf("read deletionPolicy: %v", err)
+	}
+	if dp != "Retain" {
+		t.Errorf("deletionPolicy = %q, want %q", dp, "Retain")
+	}
+
+	tmplData, _, err := unstructured.NestedStringMap(es.Object, "spec", "target", "template", "data")
+	if err != nil {
+		t.Fatalf("read template.data: %v", err)
+	}
+	wantTmpl := map[string]string{
+		kopiaEnvRepository:   "s3://" + testS3Bucket,
+		kopiaEnvS3Endpoint:   testS3Endpoint,
+		kopiaEnvS3Bucket:     testS3Bucket,
+		kopiaEnvS3DisableTLS: labelTrue,
+	}
+	for k, want := range wantTmpl {
+		if got := tmplData[k]; got != want {
+			t.Errorf("template.data[%q] = %q, want %q", k, got, want)
+		}
+	}
+	// Regression: the legacy filesystem keys must be gone.
+	for _, banned := range []string{"KOPIA_FS_PATH"} {
+		if _, ok := tmplData[banned]; ok {
+			t.Errorf("template.data must not contain legacy key %q (v2.x → v3 migration)", banned)
+		}
+	}
+	if strings.Contains(tmplData[kopiaEnvRepository], "filesystem://") {
+		t.Errorf("KOPIA_REPOSITORY = %q, must not start with filesystem://", tmplData[kopiaEnvRepository])
+	}
+
+	// data[] should carry exactly three remoteRefs in stable order.
+	dataList, _, err := unstructured.NestedSlice(es.Object, "spec", dataField)
+	if err != nil {
+		t.Fatalf("read data: %v", err)
+	}
+	if len(dataList) != 3 {
+		t.Fatalf("spec.data length = %d, want 3", len(dataList))
+	}
+
+	wantRefs := []struct {
+		secretKey string
+		property  string
+	}{
+		{kopiaEnvPassword, testKopiaPwProp},
+		{awsEnvAccessKeyID, testS3AccessProp},
+		{awsEnvSecretAccessKey, testS3SecretProp},
+	}
+	for i, want := range wantRefs {
+		entry, ok := dataList[i].(map[string]interface{})
+		if !ok {
+			t.Fatalf("data[%d] is not a map: %T", i, dataList[i])
+		}
+		if got, _ := entry[esFieldSecretKey].(string); got != want.secretKey {
+			t.Errorf("data[%d].secretKey = %q, want %q", i, got, want.secretKey)
+		}
+		ref, ok := entry[esFieldRemoteRef].(map[string]interface{})
+		if !ok {
+			t.Fatalf("data[%d].remoteRef is not a map", i)
+		}
+		if got, _ := ref[esFieldKey].(string); got != testVaultKey {
+			t.Errorf("data[%d].remoteRef.key = %q, want %q", i, got, testVaultKey)
+		}
+		if got, _ := ref[esFieldProperty].(string); got != want.property {
+			t.Errorf("data[%d].remoteRef.property = %q, want %q", i, got, want.property)
+		}
+	}
+}
+
+// TestEnsureExternalSecret_RecyclesLegacyFilesystemShape pins the one-time
+// v2 → v3 migration: a pre-existing ES with KOPIA_REPOSITORY=filesystem:///…
+// must be deleted and recreated in the new S3 shape on the next reconcile.
+// This is the ONLY drift correction the reconciler performs.
+func TestEnsureExternalSecret_RecyclesLegacyFilesystemShape(t *testing.T) {
+	scheme := newTestScheme(t)
+	pvc := labeledPVC("hourly", corev1.ClaimBound, 3*time.Hour)
+
+	// Pre-existing legacy ES, mimicking the v2.x rendered shape.
+	legacy := childObject(esGVK, testNamespace, testESName, testPVCName)
+	legacy.Object["spec"] = map[string]interface{}{
+		esFieldRefreshInterval: "1h",
+		"secretStoreRef": map[string]interface{}{
+			"kind":      "ClusterSecretStore",
+			esFieldName: testStoreName,
+		},
+		esFieldTarget: map[string]interface{}{
+			esFieldName:           testESName,
+			esFieldCreationPolicy: creationPolicyOwner,
+			esFieldTemplate: map[string]interface{}{
+				"engineVersion": "v2",
+				"mergePolicy":   "Merge",
+				dataField: map[string]interface{}{
+					kopiaEnvRepository: "filesystem:///repository",
+					"KOPIA_FS_PATH":    "/repository",
+				},
+			},
+		},
+		dataField: []interface{}{
+			esRemoteRef(kopiaEnvPassword, testVaultKey, testKopiaPwProp),
+		},
+	}
+
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc, legacy).Build()
+	r := newTestReconciler(cli)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}}); err != nil {
+		t.Fatalf("reconcile errored: %v", err)
+	}
+
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(esGVK)
+	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testESName}, got); err != nil {
+		t.Fatalf("get ES: %v", err)
+	}
+	repo, _, err := unstructured.NestedString(got.Object, "spec", esFieldTarget, esFieldTemplate, dataField, kopiaEnvRepository)
+	if err != nil {
+		t.Fatalf("read KOPIA_REPOSITORY: %v", err)
+	}
+	if !strings.HasPrefix(repo, "s3://") {
+		t.Errorf("after recycle: KOPIA_REPOSITORY = %q, want prefix %q (legacy ES not recycled)", repo, "s3://")
+	}
+
+	// data[] now has the three S3-shape entries.
+	dataList, _, err := unstructured.NestedSlice(got.Object, "spec", dataField)
+	if err != nil {
+		t.Fatalf("read data: %v", err)
+	}
+	if len(dataList) != 3 {
+		t.Errorf("after recycle: spec.data len = %d, want 3", len(dataList))
+	}
+}
+
+// TestEnsureExternalSecret_NoRecycleOnSteadyState pins the inverse of the
+// migration test: a pre-existing v3-shaped ES must NOT be recycled (the
+// reconciler is Get-or-Create in steady state). This guards against an
+// over-eager migration helper that drift-corrects every reconcile.
+func TestEnsureExternalSecret_NoRecycleOnSteadyState(t *testing.T) {
+	scheme := newTestScheme(t)
+	pvc := labeledPVC("hourly", corev1.ClaimBound, 3*time.Hour)
+
+	preExisting := childObject(esGVK, testNamespace, testESName, testPVCName)
+	preExisting.Object["spec"] = map[string]interface{}{
+		esFieldRefreshInterval: "1h",
+		esFieldTarget: map[string]interface{}{
+			esFieldName:           testESName,
+			esFieldCreationPolicy: creationPolicyOwner,
+			esFieldTemplate: map[string]interface{}{
+				dataField: map[string]interface{}{
+					kopiaEnvRepository: "s3://" + testS3Bucket,
+				},
+			},
+		},
+		dataField: []interface{}{
+			esRemoteRef(kopiaEnvPassword, testVaultKey, testKopiaPwProp),
+		},
+	}
+	// Annotate with a deliberate hand-edit marker; if the reconciler recycles
+	// the ES the annotation will be lost.
+	preExisting.SetAnnotations(map[string]string{"operator.note": "do-not-recycle"})
+
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc, preExisting).Build()
+	r := newTestReconciler(cli)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPVCName}}); err != nil {
+		t.Fatalf("reconcile errored: %v", err)
+	}
+
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(esGVK)
+	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: testESName}, got); err != nil {
+		t.Fatalf("get ES: %v", err)
+	}
+	if got.GetAnnotations()["operator.note"] != "do-not-recycle" {
+		t.Errorf("pre-existing v3-shape ES was recycled (lost hand-edit annotation); reconciler must be Get-or-Create in steady state")
+	}
 }

@@ -117,7 +117,7 @@ func buildEntry(key string, exists bool, expiry time.Time) (entry, bool) {
 			Authoritative: true,
 			Namespace:     namespace,
 			Pvc:           pvc,
-			Backend:       "kopia-fs",
+			Backend:       backend.TypeKopiaS3,
 			Source:        pvc + "-backup@" + namespace + ":/data",
 		},
 		expiresAt: expiry,

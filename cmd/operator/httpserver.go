@@ -28,7 +28,7 @@ import (
 
 // backendBundle groups the constructed backend, the cache wrapper that
 // fronts it, and (when applicable) the typed *kopia.Client. The kopia
-// pointer is only set for BACKEND_TYPE=kopia-fs; callers must nil-check
+// pointer is only set for BACKEND_TYPE=kopia-s3; callers must nil-check
 // before using it (e.g. for the periodic cache re-warm loop).
 type backendBundle struct {
 	backend handler.BackendClient
@@ -60,9 +60,20 @@ func buildBackend(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 		}
 		backendClient = s3Client
 
-	case "kopia-fs":
-		logger.Info("initializing kopia-fs backend", "path", cfg.KopiaRepositoryPath)
-		kc := kopia.NewClient(cfg.KopiaRepositoryPath, cfg.KopiaPassword, logger)
+	case "kopia-s3":
+		logger.Info("initializing kopia-s3 backend",
+			"endpoint", cfg.KopiaS3Endpoint,
+			"bucket", cfg.KopiaS3Bucket,
+			"disable_tls", cfg.KopiaS3DisableTLS,
+		)
+		kc := kopia.NewClient(kopia.S3Config{
+			Endpoint:   cfg.KopiaS3Endpoint,
+			Bucket:     cfg.KopiaS3Bucket,
+			AccessKey:  cfg.KopiaS3AccessKey,
+			SecretKey:  cfg.KopiaS3SecretKey,
+			Password:   cfg.KopiaPassword,
+			DisableTLS: cfg.KopiaS3DisableTLS,
+		}, logger)
 		if err := kc.Connect(ctx); err != nil {
 			return nil, fmt.Errorf("connect to kopia repository: %w", err)
 		}

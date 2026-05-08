@@ -170,7 +170,7 @@ func TestCheckBackupExists_SingleflightDedupsConcurrentLookups(t *testing.T) {
 			Exists:        true,
 			Decision:      backend.DecisionRestore,
 			Authoritative: true,
-			Backend:       backend.TypeKopiaFS,
+			Backend:       backend.TypeKopiaS3,
 		},
 	}
 	c := New(bk, time.Minute, discardLogger())

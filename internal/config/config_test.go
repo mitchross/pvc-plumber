@@ -13,17 +13,29 @@ import (
 // one-line change to rename a fixture string.
 const (
 	// Env var names exercised by Load().
-	envBackendType   = "BACKEND_TYPE"
-	envS3Endpoint    = "S3_ENDPOINT"
-	envS3Bucket      = "S3_BUCKET"
-	envS3AccessKey   = "S3_ACCESS_KEY"
-	envS3SecretKey   = "S3_SECRET_KEY"
-	envS3Secure      = "S3_SECURE"
-	envHTTPTimeout   = "HTTP_TIMEOUT"
-	envPort          = "PORT"
-	envLogLevel      = "LOG_LEVEL"
-	envKopiaRepoPath = "KOPIA_REPOSITORY_PATH"
-	envKopiaPassword = "KOPIA_PASSWORD"
+	envBackendType        = "BACKEND_TYPE"
+	envS3Endpoint         = "S3_ENDPOINT"
+	envS3Bucket           = "S3_BUCKET"
+	envS3AccessKey        = "S3_ACCESS_KEY"
+	envS3SecretKey        = "S3_SECRET_KEY"
+	envS3Secure           = "S3_SECURE"
+	envHTTPTimeout        = "HTTP_TIMEOUT"
+	envPort               = "PORT"
+	envLogLevel           = "LOG_LEVEL"
+	envKopiaPassword      = "KOPIA_PASSWORD"
+	envKopiaS3Endpoint    = "KOPIA_S3_ENDPOINT"
+	envKopiaS3Bucket      = "KOPIA_S3_BUCKET"
+	envKopiaS3DisableTLS  = "KOPIA_S3_DISABLE_TLS"
+	envAWSAccessKeyID     = "AWS_ACCESS_KEY_ID"
+	envAWSSecretAccessKey = "AWS_SECRET_ACCESS_KEY"
+
+	// ExternalSecret-rendering env vars (loaded unconditionally; defaults
+	// pin to the reference cluster's 1Password Connect layout).
+	envESStoreName             = "EXTERNAL_SECRETS_STORE_NAME"
+	envESVaultKey              = "EXTERNAL_SECRETS_VAULT_KEY"
+	envESKopiaPasswordProperty = "EXTERNAL_SECRETS_KOPIA_PASSWORD_PROPERTY"
+	envESS3AccessKeyProperty   = "EXTERNAL_SECRETS_S3_ACCESS_KEY_PROPERTY"
+	envESS3SecretKeyProperty   = "EXTERNAL_SECRETS_S3_SECRET_KEY_PROPERTY"
 
 	// Repeated test values across multiple table rows.
 	testEndpoint = "localhost:9000"
@@ -32,32 +44,55 @@ const (
 	testSecret   = "secretkey"
 	testLogDebug = "debug"
 	testLogInfo  = "info"
+
+	// Kopia-S3 fixture values used across the kopia-s3 backend table.
+	testKopiaBucket   = "kopia"
+	testKopiaEndpoint = "http://example.com"
+	testKopiaPassword = "kp"
 )
 
-func TestLoad_S3Backend(t *testing.T) {
-	// Save original env vars
-	origVars := map[string]string{
-		envBackendType: os.Getenv(envBackendType),
-		envS3Endpoint:  os.Getenv(envS3Endpoint),
-		envS3Bucket:    os.Getenv(envS3Bucket),
-		envS3AccessKey: os.Getenv(envS3AccessKey),
-		envS3SecretKey: os.Getenv(envS3SecretKey),
-		envS3Secure:    os.Getenv(envS3Secure),
-		envHTTPTimeout: os.Getenv(envHTTPTimeout),
-		envPort:        os.Getenv(envPort),
-		envLogLevel:    os.Getenv(envLogLevel),
-	}
+// allEnvVars is every env var Load() may read. Save / clear / restore in
+// every test case so the table runs are hermetic regardless of ambient env.
+var allEnvVars = []string{
+	envBackendType, envS3Endpoint, envS3Bucket, envS3AccessKey, envS3SecretKey,
+	envS3Secure, envHTTPTimeout, envPort, envLogLevel,
+	envKopiaPassword, envKopiaS3Endpoint, envKopiaS3Bucket, envKopiaS3DisableTLS,
+	envAWSAccessKeyID, envAWSSecretAccessKey,
+	envESStoreName, envESVaultKey, envESKopiaPasswordProperty,
+	envESS3AccessKeyProperty, envESS3SecretKeyProperty,
+	"RE_WARM_INTERVAL",
+}
 
-	// Restore env vars after test
-	defer func() {
-		for k, v := range origVars {
-			if v == "" {
-				_ = os.Unsetenv(k)
-			} else {
-				_ = os.Setenv(k, v)
-			}
+// snapshotEnv saves the current values of allEnvVars; restoreEnv puts them
+// back. Used as t.Cleanup so even a failing test doesn't leak env into the
+// next case.
+func snapshotEnv() map[string]string {
+	out := make(map[string]string, len(allEnvVars))
+	for _, k := range allEnvVars {
+		out[k] = os.Getenv(k)
+	}
+	return out
+}
+
+func restoreEnv(saved map[string]string) {
+	for k, v := range saved {
+		if v == "" {
+			_ = os.Unsetenv(k)
+		} else {
+			_ = os.Setenv(k, v)
 		}
-	}()
+	}
+}
+
+func clearAllEnv() {
+	for _, k := range allEnvVars {
+		_ = os.Unsetenv(k)
+	}
+}
+
+func TestLoad_S3Backend(t *testing.T) {
+	saved := snapshotEnv()
+	t.Cleanup(func() { restoreEnv(saved) })
 
 	tests := []struct {
 		name         string
@@ -211,12 +246,7 @@ func TestLoad_S3Backend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clear all env vars
-			for k := range origVars {
-				_ = os.Unsetenv(k)
-			}
-
-			// Set test env vars
+			clearAllEnv()
 			for k, v := range tt.envVars {
 				_ = os.Setenv(k, v)
 			}
@@ -238,35 +268,27 @@ func TestLoad_S3Backend(t *testing.T) {
 			if cfg.BackendType != tt.wantBackend {
 				t.Errorf("BackendType = %v, want %v", cfg.BackendType, tt.wantBackend)
 			}
-
 			if cfg.S3Endpoint != tt.wantEndpoint {
 				t.Errorf("S3Endpoint = %v, want %v", cfg.S3Endpoint, tt.wantEndpoint)
 			}
-
 			if cfg.S3Bucket != tt.wantBucket {
 				t.Errorf("S3Bucket = %v, want %v", cfg.S3Bucket, tt.wantBucket)
 			}
-
 			if cfg.S3AccessKey != tt.wantAccess {
 				t.Errorf("S3AccessKey = %v, want %v", cfg.S3AccessKey, tt.wantAccess)
 			}
-
 			if cfg.S3SecretKey != tt.wantSecret {
 				t.Errorf("S3SecretKey = %v, want %v", cfg.S3SecretKey, tt.wantSecret)
 			}
-
 			if cfg.S3Secure != tt.wantSecure {
 				t.Errorf("S3Secure = %v, want %v", cfg.S3Secure, tt.wantSecure)
 			}
-
 			if cfg.HTTPTimeout != tt.wantTimeout {
 				t.Errorf("HTTPTimeout = %v, want %v", cfg.HTTPTimeout, tt.wantTimeout)
 			}
-
 			if cfg.Port != tt.wantPort {
 				t.Errorf("Port = %v, want %v", cfg.Port, tt.wantPort)
 			}
-
 			if cfg.LogLevel != tt.wantLogLevel {
 				t.Errorf("LogLevel = %v, want %v", cfg.LogLevel, tt.wantLogLevel)
 			}
@@ -275,23 +297,8 @@ func TestLoad_S3Backend(t *testing.T) {
 }
 
 func TestLoad_ReWarmInterval(t *testing.T) {
-	origVars := map[string]string{
-		envBackendType:     os.Getenv(envBackendType),
-		envS3Endpoint:      os.Getenv(envS3Endpoint),
-		envS3Bucket:        os.Getenv(envS3Bucket),
-		envS3AccessKey:     os.Getenv(envS3AccessKey),
-		envS3SecretKey:     os.Getenv(envS3SecretKey),
-		"RE_WARM_INTERVAL": os.Getenv("RE_WARM_INTERVAL"),
-	}
-	defer func() {
-		for k, v := range origVars {
-			if v == "" {
-				_ = os.Unsetenv(k)
-			} else {
-				_ = os.Setenv(k, v)
-			}
-		}
-	}()
+	saved := snapshotEnv()
+	t.Cleanup(func() { restoreEnv(saved) })
 
 	tests := []struct {
 		name    string
@@ -309,9 +316,7 @@ func TestLoad_ReWarmInterval(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			for k := range origVars {
-				_ = os.Unsetenv(k)
-			}
+			clearAllEnv()
 			_ = os.Setenv(envBackendType, "s3")
 			_ = os.Setenv(envS3Endpoint, testEndpoint)
 			_ = os.Setenv(envS3Bucket, "bucket")
@@ -338,80 +343,124 @@ func TestLoad_ReWarmInterval(t *testing.T) {
 	}
 }
 
-func TestLoad_KopiaBackend(t *testing.T) {
-	// Save original env vars
-	origVars := map[string]string{
-		envBackendType:   os.Getenv(envBackendType),
-		envKopiaRepoPath: os.Getenv(envKopiaRepoPath),
-		envKopiaPassword: os.Getenv(envKopiaPassword),
-		envHTTPTimeout:   os.Getenv(envHTTPTimeout),
-		envPort:          os.Getenv(envPort),
-		envLogLevel:      os.Getenv(envLogLevel),
-	}
-
-	// Restore env vars after test
-	defer func() {
-		for k, v := range origVars {
-			if v == "" {
-				_ = os.Unsetenv(k)
-			} else {
-				_ = os.Setenv(k, v)
-			}
-		}
-	}()
-
-	// Create a temp directory for testing
-	tmpDir := t.TempDir()
+// TestLoad_KopiaS3Backend exercises the v3.0.0 kopia-s3 backend path.
+// Replaces the v2 TestLoad_KopiaBackend (which validated KOPIA_REPOSITORY_PATH
+// stat-on-disk semantics that no longer exist).
+func TestLoad_KopiaS3Backend(t *testing.T) {
+	saved := snapshotEnv()
+	t.Cleanup(func() { restoreEnv(saved) })
 
 	tests := []struct {
-		name          string
-		envVars       map[string]string
-		wantErr       bool
-		wantBackend   string
-		wantKopiaPath string
-		wantTimeout   time.Duration
-		wantPort      string
-		wantLogLevel  string
+		name           string
+		envVars        map[string]string
+		wantErr        bool
+		wantEndpoint   string
+		wantBucket     string
+		wantAccess     string
+		wantSecret     string
+		wantPassword   string
+		wantDisableTLS bool
 	}{
 		{
-			name: "valid kopia-fs config",
+			name: "valid kopia-s3 with --disable-tls",
 			envVars: map[string]string{
-				envBackendType:   backend.TypeKopiaFS,
-				envKopiaRepoPath: tmpDir,
-				envKopiaPassword: "testpassword",
-				envHTTPTimeout:   "5s",
-				envPort:          "9090",
-				envLogLevel:      testLogDebug,
+				envBackendType:        backend.TypeKopiaS3,
+				envKopiaS3Endpoint:    "http://192.168.10.133:30293",
+				envKopiaS3Bucket:      "volsync-kopia",
+				envAWSAccessKeyID:     testAccess,
+				envAWSSecretAccessKey: testSecret,
+				envKopiaS3DisableTLS:  "true",
+				envKopiaPassword:      testKopiaPassword,
 			},
-			wantErr:       false,
-			wantBackend:   backend.TypeKopiaFS,
-			wantKopiaPath: tmpDir,
-			wantTimeout:   5 * time.Second,
-			wantPort:      "9090",
-			wantLogLevel:  testLogDebug,
+			wantEndpoint:   "http://192.168.10.133:30293",
+			wantBucket:     "volsync-kopia",
+			wantAccess:     testAccess,
+			wantSecret:     testSecret,
+			wantPassword:   testKopiaPassword,
+			wantDisableTLS: true,
 		},
 		{
-			name: "kopia-fs with default path that doesn't exist",
+			name: "valid kopia-s3 without --disable-tls (default false)",
 			envVars: map[string]string{
-				envBackendType: backend.TypeKopiaFS,
-				// KOPIA_REPOSITORY_PATH not set, defaults to /repository which likely doesn't exist
+				envBackendType:        backend.TypeKopiaS3,
+				envKopiaS3Endpoint:    "https://s3.example.com",
+				envKopiaS3Bucket:      testKopiaBucket,
+				envAWSAccessKeyID:     testAccess,
+				envAWSSecretAccessKey: testSecret,
+				envKopiaPassword:      testKopiaPassword,
+			},
+			wantEndpoint:   "https://s3.example.com",
+			wantBucket:     testKopiaBucket,
+			wantAccess:     testAccess,
+			wantSecret:     testSecret,
+			wantPassword:   testKopiaPassword,
+			wantDisableTLS: false,
+		},
+		{
+			name: "kopia-s3 missing endpoint",
+			envVars: map[string]string{
+				envBackendType:        backend.TypeKopiaS3,
+				envKopiaS3Bucket:      testKopiaBucket,
+				envAWSAccessKeyID:     testAccess,
+				envAWSSecretAccessKey: testSecret,
+				envKopiaPassword:      testKopiaPassword,
 			},
 			wantErr: true,
 		},
 		{
-			name: "kopia-fs with non-existent path",
+			name: "kopia-s3 missing bucket",
 			envVars: map[string]string{
-				envBackendType:   backend.TypeKopiaFS,
-				envKopiaRepoPath: "/nonexistent/path/to/repo",
-				envKopiaPassword: "testpassword",
+				envBackendType:        backend.TypeKopiaS3,
+				envKopiaS3Endpoint:    testKopiaEndpoint,
+				envAWSAccessKeyID:     testAccess,
+				envAWSSecretAccessKey: testSecret,
+				envKopiaPassword:      testKopiaPassword,
 			},
 			wantErr: true,
 		},
 		{
-			name: "kopia-fs missing password",
+			name: "kopia-s3 missing access key",
 			envVars: map[string]string{
-				envBackendType:   backend.TypeKopiaFS,
-				envKopiaRepoPath: tmpDir,
+				envBackendType:        backend.TypeKopiaS3,
+				envKopiaS3Endpoint:    testKopiaEndpoint,
+				envKopiaS3Bucket:      testKopiaBucket,
+				envAWSSecretAccessKey: testSecret,
+				envKopiaPassword:      testKopiaPassword,
+			},
+			wantErr: true,
+		},
+		{
+			name: "kopia-s3 missing secret key",
+			envVars: map[string]string{
+				envBackendType:     backend.TypeKopiaS3,
+				envKopiaS3Endpoint: testKopiaEndpoint,
+				envKopiaS3Bucket:   testKopiaBucket,
+				envAWSAccessKeyID:  testAccess,
+				envKopiaPassword:   testKopiaPassword,
+			},
+			wantErr: true,
+		},
+		{
+			name: "kopia-s3 missing password",
+			envVars: map[string]string{
+				envBackendType:        backend.TypeKopiaS3,
+				envKopiaS3Endpoint:    testKopiaEndpoint,
+				envKopiaS3Bucket:      testKopiaBucket,
+				envAWSAccessKeyID:     testAccess,
+				envAWSSecretAccessKey: testSecret,
+			},
+			wantErr: true,
+		},
+		{
+			name: "kopia-s3 invalid disable-tls",
+			envVars: map[string]string{
+				envBackendType:        backend.TypeKopiaS3,
+				envKopiaS3Endpoint:    testKopiaEndpoint,
+				envKopiaS3Bucket:      testKopiaBucket,
+				envAWSAccessKeyID:     testAccess,
+				envAWSSecretAccessKey: testSecret,
+				envKopiaS3DisableTLS:  "definitely-not-a-bool",
+				envKopiaPassword:      testKopiaPassword,
 			},
 			wantErr: true,
 		},
@@ -419,49 +468,124 @@ func TestLoad_KopiaBackend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clear all env vars
-			for k := range origVars {
-				_ = os.Unsetenv(k)
-			}
-
-			// Set test env vars
+			clearAllEnv()
 			for k, v := range tt.envVars {
 				_ = os.Setenv(k, v)
 			}
 
 			cfg, err := Load()
-
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("Load() error = nil, wantErr = true")
 				}
 				return
 			}
-
 			if err != nil {
 				t.Errorf("Load() unexpected error = %v", err)
 				return
 			}
 
-			if cfg.BackendType != tt.wantBackend {
-				t.Errorf("BackendType = %v, want %v", cfg.BackendType, tt.wantBackend)
+			if cfg.BackendType != backend.TypeKopiaS3 {
+				t.Errorf("BackendType = %v, want %v", cfg.BackendType, backend.TypeKopiaS3)
 			}
-
-			if cfg.KopiaRepositoryPath != tt.wantKopiaPath {
-				t.Errorf("KopiaRepositoryPath = %v, want %v", cfg.KopiaRepositoryPath, tt.wantKopiaPath)
+			if cfg.KopiaS3Endpoint != tt.wantEndpoint {
+				t.Errorf("KopiaS3Endpoint = %v, want %v", cfg.KopiaS3Endpoint, tt.wantEndpoint)
 			}
-
-			if cfg.HTTPTimeout != tt.wantTimeout {
-				t.Errorf("HTTPTimeout = %v, want %v", cfg.HTTPTimeout, tt.wantTimeout)
+			if cfg.KopiaS3Bucket != tt.wantBucket {
+				t.Errorf("KopiaS3Bucket = %v, want %v", cfg.KopiaS3Bucket, tt.wantBucket)
 			}
-
-			if cfg.Port != tt.wantPort {
-				t.Errorf("Port = %v, want %v", cfg.Port, tt.wantPort)
+			if cfg.KopiaS3AccessKey != tt.wantAccess {
+				t.Errorf("KopiaS3AccessKey = %v, want %v", cfg.KopiaS3AccessKey, tt.wantAccess)
 			}
-
-			if cfg.LogLevel != tt.wantLogLevel {
-				t.Errorf("LogLevel = %v, want %v", cfg.LogLevel, tt.wantLogLevel)
+			if cfg.KopiaS3SecretKey != tt.wantSecret {
+				t.Errorf("KopiaS3SecretKey = %v, want %v", cfg.KopiaS3SecretKey, tt.wantSecret)
+			}
+			if cfg.KopiaPassword != tt.wantPassword {
+				t.Errorf("KopiaPassword = %v, want %v", cfg.KopiaPassword, tt.wantPassword)
+			}
+			if cfg.KopiaS3DisableTLS != tt.wantDisableTLS {
+				t.Errorf("KopiaS3DisableTLS = %v, want %v", cfg.KopiaS3DisableTLS, tt.wantDisableTLS)
 			}
 		})
+	}
+}
+
+// TestLoad_ExternalSecretsConfigDefaults pins the per-PVC ExternalSecret
+// rendering knobs' defaults — they MUST match the reference cluster's
+// 1Password Connect layout (vault item `rustfs`, kopia_password +
+// k8s-admin-{access,secret}-key properties). If a defaults change is
+// intentional, update both the loader and this test in the same commit.
+func TestLoad_ExternalSecretsConfigDefaults(t *testing.T) {
+	saved := snapshotEnv()
+	t.Cleanup(func() { restoreEnv(saved) })
+
+	clearAllEnv()
+	_ = os.Setenv(envBackendType, "s3")
+	_ = os.Setenv(envS3Endpoint, testEndpoint)
+	_ = os.Setenv(envS3Bucket, "bucket")
+	_ = os.Setenv(envS3AccessKey, "k")
+	_ = os.Setenv(envS3SecretKey, "s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.ExternalSecretsStoreName != "1password" {
+		t.Errorf("default ExternalSecretsStoreName = %q, want %q", cfg.ExternalSecretsStoreName, "1password")
+	}
+	if cfg.ExternalSecretsVaultKey != "rustfs" {
+		t.Errorf("default ExternalSecretsVaultKey = %q, want %q", cfg.ExternalSecretsVaultKey, "rustfs")
+	}
+	if cfg.ExternalSecretsKopiaPasswordProperty != "kopia_password" {
+		t.Errorf("default ExternalSecretsKopiaPasswordProperty = %q", cfg.ExternalSecretsKopiaPasswordProperty)
+	}
+	if cfg.ExternalSecretsS3AccessKeyProperty != "k8s-admin-access-key" {
+		t.Errorf("default ExternalSecretsS3AccessKeyProperty = %q", cfg.ExternalSecretsS3AccessKeyProperty)
+	}
+	if cfg.ExternalSecretsS3SecretKeyProperty != "k8s-admin-secret-key" {
+		t.Errorf("default ExternalSecretsS3SecretKeyProperty = %q", cfg.ExternalSecretsS3SecretKeyProperty)
+	}
+}
+
+// TestLoad_ExternalSecretsConfigOverrides exercises the env-var override
+// surface for the per-PVC ES rendering. v2 quirks #1/#2/#3 from
+// MIGRATION-v1-to-v2.md were "store name / vault item / property are
+// hardcoded"; this test pins that v3.0.0 made them configurable.
+func TestLoad_ExternalSecretsConfigOverrides(t *testing.T) {
+	saved := snapshotEnv()
+	t.Cleanup(func() { restoreEnv(saved) })
+
+	clearAllEnv()
+	_ = os.Setenv(envBackendType, "s3")
+	_ = os.Setenv(envS3Endpoint, testEndpoint)
+	_ = os.Setenv(envS3Bucket, "bucket")
+	_ = os.Setenv(envS3AccessKey, "k")
+	_ = os.Setenv(envS3SecretKey, "s")
+	_ = os.Setenv(envESStoreName, "vault-prod")
+	_ = os.Setenv(envESVaultKey, "kopia-creds")
+	_ = os.Setenv(envESKopiaPasswordProperty, "repo_password")
+	_ = os.Setenv(envESS3AccessKeyProperty, "access_key")
+	_ = os.Setenv(envESS3SecretKeyProperty, "secret_key")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if cfg.ExternalSecretsStoreName != "vault-prod" {
+		t.Errorf("ExternalSecretsStoreName = %q, want %q", cfg.ExternalSecretsStoreName, "vault-prod")
+	}
+	if cfg.ExternalSecretsVaultKey != "kopia-creds" {
+		t.Errorf("ExternalSecretsVaultKey = %q, want %q", cfg.ExternalSecretsVaultKey, "kopia-creds")
+	}
+	if cfg.ExternalSecretsKopiaPasswordProperty != "repo_password" {
+		t.Errorf("ExternalSecretsKopiaPasswordProperty = %q", cfg.ExternalSecretsKopiaPasswordProperty)
+	}
+	if cfg.ExternalSecretsS3AccessKeyProperty != "access_key" {
+		t.Errorf("ExternalSecretsS3AccessKeyProperty = %q", cfg.ExternalSecretsS3AccessKeyProperty)
+	}
+	if cfg.ExternalSecretsS3SecretKeyProperty != "secret_key" {
+		t.Errorf("ExternalSecretsS3SecretKeyProperty = %q", cfg.ExternalSecretsS3SecretKeyProperty)
 	}
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 
 	"github.com/mitchross/pvc-plumber/internal/backend"
@@ -24,49 +23,81 @@ func (e *RealExecutor) Run(ctx context.Context, name string, args ...string) ([]
 	return cmd.Output()
 }
 
-// Client wraps kopia CLI for backup existence checks.
+// S3Config bundles the inputs `kopia repository connect s3` needs. Carried
+// as a struct (rather than seven positional arguments) because v3.0.0
+// switched the operator's own kopia repository from a filesystem mount to a
+// shared S3 bucket and the constructor surface would otherwise be unwieldy.
+type S3Config struct {
+	Endpoint   string
+	Bucket     string
+	AccessKey  string
+	SecretKey  string
+	Password   string
+	DisableTLS bool
+}
+
+// Client wraps the kopia CLI for backup-existence checks against an S3-backed
+// Kopia repository. v3.0.0 removed the legacy filesystem-mount path
+// (`KOPIA_REPOSITORY_PATH`) — both the operator pod and VolSync mover Jobs
+// now use the same S3 endpoint, eliminating the shared-volume admission
+// dance that the deleted JobMutator was previously responsible for.
 type Client struct {
-	repoPath  string
-	password  string
+	cfg       S3Config
 	logger    *slog.Logger
 	connected bool
 	executor  CommandExecutor
 }
 
 // NewClient creates a new Kopia client.
-func NewClient(repoPath, password string, logger *slog.Logger) *Client {
+func NewClient(cfg S3Config, logger *slog.Logger) *Client {
 	return &Client{
-		repoPath: repoPath,
-		password: password,
+		cfg:      cfg,
 		logger:   logger,
 		executor: &RealExecutor{},
 	}
 }
 
 // NewClientWithExecutor creates a new Kopia client with a custom executor (for testing).
-func NewClientWithExecutor(repoPath, password string, logger *slog.Logger, executor CommandExecutor) *Client {
+func NewClientWithExecutor(cfg S3Config, logger *slog.Logger, executor CommandExecutor) *Client {
 	return &Client{
-		repoPath: repoPath,
-		password: password,
+		cfg:      cfg,
 		logger:   logger,
 		executor: executor,
 	}
 }
 
-// Connect connects to the kopia repository.
+// Connect connects to the kopia repository over S3. Mirrors the flag set
+// VolSync's Kopia mover uses (endpoint, bucket, access-key, secret-key,
+// password, optional --disable-tls), so the same RustFS bucket and creds
+// the mover Jobs see also work here without a separate "operator-only"
+// credential set.
 func (c *Client) Connect(ctx context.Context) error {
-	c.logger.Info("connecting to kopia repository", "path", c.repoPath)
+	c.logger.Info("connecting to kopia repository (s3)",
+		"endpoint", c.cfg.Endpoint,
+		"bucket", c.cfg.Bucket,
+		"disable_tls", c.cfg.DisableTLS,
+	)
 
-	output, err := c.executor.Run(ctx, "kopia", "repository", "connect", "filesystem",
-		"--path", c.repoPath,
-		"--password", c.password)
+	args := []string{
+		"repository", "connect", "s3",
+		"--endpoint", c.cfg.Endpoint,
+		"--bucket", c.cfg.Bucket,
+		"--access-key", c.cfg.AccessKey,
+		"--secret-access-key", c.cfg.SecretKey,
+		"--password", c.cfg.Password,
+	}
+	if c.cfg.DisableTLS {
+		args = append(args, "--disable-tls")
+	}
+
+	output, err := c.executor.Run(ctx, "kopia", args...)
 	if err != nil {
 		c.logger.Error("failed to connect to kopia repository", "error", err, "output", string(output))
 		return fmt.Errorf("failed to connect to kopia repository: %w", err)
 	}
 
 	c.connected = true
-	c.logger.Info("connected to kopia repository")
+	c.logger.Info("connected to kopia repository (s3)")
 	return nil
 }
 
@@ -92,7 +123,7 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 			Authoritative: false,
 			Namespace:     namespace,
 			Pvc:           pvc,
-			Backend:       backend.TypeKopiaFS,
+			Backend:       backend.TypeKopiaS3,
 			Source:        source,
 			Error:         fmt.Sprintf("failed to list snapshots: %v", err),
 		}
@@ -108,7 +139,7 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 			Authoritative: false,
 			Namespace:     namespace,
 			Pvc:           pvc,
-			Backend:       backend.TypeKopiaFS,
+			Backend:       backend.TypeKopiaS3,
 			Source:        source,
 			Error:         fmt.Sprintf("failed to parse kopia output: %v", err),
 		}
@@ -127,7 +158,7 @@ func (c *Client) CheckBackupExists(ctx context.Context, namespace, pvc string) b
 		Authoritative: true,
 		Namespace:     namespace,
 		Pvc:           pvc,
-		Backend:       backend.TypeKopiaFS,
+		Backend:       backend.TypeKopiaS3,
 		Source:        source,
 	}
 }
@@ -180,28 +211,24 @@ func (c *Client) IsConnected() bool {
 	return c.connected
 }
 
-// HealthCheck verifies the Kopia repository is reachable at the mount level.
+// HealthCheck verifies the Kopia repository client is in a usable state.
 // Used by the readiness probe.
 //
-// Intentionally cheap: just confirms (1) startup Connect() succeeded and
-// (2) the repository path still stat()s. Running `kopia repository status`
-// on every probe spawns a subprocess that takes >1s over NFS with large
-// repos, and the request context cancel (kubelet probe timeout) sends
-// SIGKILL mid-query — producing false-negative "signal: killed" readiness
-// failures that block the fail-closed PVC gate.
+// Intentionally cheap: just confirms the startup Connect() succeeded. We
+// deliberately do NOT spawn a fresh `kopia repository status` subprocess on
+// every probe — over a stuck S3 endpoint that command can take >1s and the
+// kubelet probe timeout SIGKILLs it mid-query, producing false-negative
+// "signal: killed" readiness failures that block the fail-closed PVC gate.
 //
-// Deep validation (credential issues, corruption) surfaces on the next
-// CheckBackupExists call, which returns an error to Kyverno; the
-// fail-closed validate rule then denies PVC creation — same safety
-// guarantee, without hammering kopia every 10 seconds.
-func (c *Client) HealthCheck(ctx context.Context) error {
+// Pre-v3.0.0 this also stat()'d KOPIA_REPOSITORY_PATH; that check is gone
+// because the repo is no longer a local mount. Deep validation (creds,
+// reachability, corruption) surfaces on the next CheckBackupExists call,
+// which returns an error to the validating webhook; the fail-closed validate
+// rule then denies PVC creation — same safety guarantee, without hammering
+// the S3 endpoint every 10 seconds.
+func (c *Client) HealthCheck(_ context.Context) error {
 	if !c.connected {
 		return fmt.Errorf("kopia repository not connected")
 	}
-
-	if _, err := os.Stat(c.repoPath); err != nil {
-		return fmt.Errorf("repository path inaccessible: %w", err)
-	}
-
 	return nil
 }

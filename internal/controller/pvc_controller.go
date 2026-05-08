@@ -1,11 +1,15 @@
 // Package controller contains controller-runtime reconcilers for pvc-plumber.
 //
-// Phase 2a: PVCReconciler ports Kyverno generate rules 5–7 (the
-// ExternalSecret / ReplicationSource / ReplicationDestination triplet) plus
-// the orphan-reaper logic that the previous Kyverno implementation could not
-// express. The reconciler is the source of truth for the lifecycle of the
-// generated children — it never reaches into Kopia or NFS itself; that's the
-// webhook layer's job.
+// PVCReconciler owns the lifecycle of the per-PVC ExternalSecret /
+// ReplicationSource / ReplicationDestination triplet (originally ported
+// from Kyverno generate rules 5–7) plus the orphan-reaper that the Kyverno
+// implementation could not express. The reconciler does not reach into the
+// Kopia repository itself — that lives in the webhook layer.
+//
+// v3.0.0: ensureExternalSecret renders an S3-flavored kopia-credentials
+// payload (was: filesystem:///repository). It also runs a one-time
+// delete-and-recreate migration when it encounters the legacy v2.x shape,
+// so the v2 → v3 cutover doesn't require manual ES recycling.
 package controller
 
 import (
@@ -13,6 +17,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -53,6 +58,42 @@ const (
 	// with the required `backupExemptReasonAnnot` audit-trail annotation.
 	// See v3 spec § "Labels and annotations contract".
 	backupExemptLabel = "backup-exempt"
+
+	// labelTrue is the string-literal "true" used as the value of
+	// boolean-like labels (e.g. `backup-exempt: "true"`). Kept as a constant
+	// so goconst doesn't flag every comparison and so a future flip to a
+	// typed bool (or a different sentinel) only changes one place.
+	labelTrue = "true"
+
+	// ExternalSecret/spec field name literals used when assembling the
+	// unstructured object the reconciler creates. These are the ES v1 CRD's
+	// documented field names; centralizing them keeps the rendered map
+	// keys consistent and silences goconst on the repeated literals.
+	esFieldRefreshInterval = "refreshInterval"
+	esFieldName            = "name"
+	esFieldTarget          = "target"
+	esFieldCreationPolicy  = "creationPolicy"
+	esFieldTemplate        = "template"
+	esFieldRemoteRef       = "remoteRef"
+	esFieldKey             = "key"
+	esFieldProperty        = "property"
+	esFieldSecretKey       = "secretKey"
+
+	// Per-PVC kopia env-var keys rendered into the ES `target.template.data`
+	// map. Mover Jobs read these directly. KOPIA_REPOSITORY shape is
+	// `s3://<bucket>` so kopia infers backend=s3.
+	kopiaEnvRepository    = "KOPIA_REPOSITORY"
+	kopiaEnvPassword      = "KOPIA_PASSWORD"
+	kopiaEnvS3Endpoint    = "KOPIA_S3_ENDPOINT"
+	kopiaEnvS3Bucket      = "KOPIA_S3_BUCKET"
+	kopiaEnvS3DisableTLS  = "KOPIA_S3_DISABLE_TLS"
+	awsEnvAccessKeyID     = "AWS_ACCESS_KEY_ID"
+	awsEnvSecretAccessKey = "AWS_SECRET_ACCESS_KEY"
+
+	// creationPolicyOwner is the ES creationPolicy value that has the
+	// rendered Secret garbage-collected with the ES. Constant so a switch
+	// to a different policy is a one-line change.
+	creationPolicyOwner = "Owner"
 )
 
 // GVKs for the three child kinds. We use unstructured everywhere so the
@@ -79,6 +120,45 @@ var (
 	childGVKs = []schema.GroupVersionKind{esGVK, rsGVK, rdGVK}
 )
 
+// ExternalSecretConfig captures the (defaulted, env-var-overridable)
+// rendering parameters the reconciler needs when it templates the per-PVC
+// `volsync-<pvc>` ExternalSecret. Centralizing them here keeps the secret
+// store / vault item / property names out of code constants — they're
+// configuration in v3.0.0 (resolved v2 quirk #1, #2, #3 from
+// MIGRATION-v1-to-v2.md § 5).
+//
+// All fields are required at construction time; cmd/operator/main.go applies
+// defaults via internal/config.loadExternalSecretsConfig before passing the
+// struct in, so an unconfigured reconciler is a programmer error rather than
+// a silent broken-template footgun.
+type ExternalSecretConfig struct {
+	// SecretStoreName is the ClusterSecretStore name the rendered ES
+	// references (default `1password`).
+	SecretStoreName string
+	// VaultKey is the remoteRef.key — the secret store item that holds
+	// the kopia password and S3 admin keys (default `rustfs`).
+	VaultKey string
+	// KopiaPasswordProperty is the remoteRef.property for the kopia repo
+	// password (default `kopia_password`).
+	KopiaPasswordProperty string
+	// S3AccessKeyProperty is the remoteRef.property for AWS_ACCESS_KEY_ID
+	// (default `k8s-admin-access-key`).
+	S3AccessKeyProperty string
+	// S3SecretKeyProperty is the remoteRef.property for AWS_SECRET_ACCESS_KEY
+	// (default `k8s-admin-secret-key`).
+	S3SecretKeyProperty string
+	// S3Endpoint is rendered into the ES `target.template.data` map as
+	// KOPIA_S3_ENDPOINT — VolSync mover Jobs read this to find RustFS.
+	S3Endpoint string
+	// S3Bucket is rendered as KOPIA_S3_BUCKET. Also baked into the
+	// KOPIA_REPOSITORY URL (`s3://<bucket>`) so kopia knows the backend
+	// type from the URL alone.
+	S3Bucket string
+	// S3DisableTLS is rendered as the string "true"/"false" under
+	// KOPIA_S3_DISABLE_TLS. In-cluster RustFS over HTTP needs "true".
+	S3DisableTLS bool
+}
+
 // PVCReconciler reconciles PersistentVolumeClaim objects that carry a
 // `backup: hourly|daily` label. It owns the lifecycle of the companion
 // ExternalSecret, ReplicationSource, and ReplicationDestination resources.
@@ -94,6 +174,10 @@ type PVCReconciler struct {
 	// management (kube-system, volsync-system, kyverno, …). Membership is
 	// checked with `_, ok := SystemNamespaces[ns]`.
 	SystemNamespaces map[string]struct{}
+
+	// ExternalSecret holds the rendering parameters for per-PVC
+	// `volsync-<pvc>` ExternalSecret objects. See ExternalSecretConfig.
+	ExternalSecret ExternalSecretConfig
 }
 
 // RBAC for this controller is hand-managed in
@@ -142,7 +226,7 @@ func (r *PVCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// backed up" opt-out. Treat it the same as label-removed: if a previously
 	// backup-labeled PVC has exempt added, reap any managed-by children so we
 	// don't keep a stale ES/RS/RD pinned to an exempt PVC.
-	isExempt := pvc.Labels[backupExemptLabel] == "true"
+	isExempt := pvc.Labels[backupExemptLabel] == labelTrue
 
 	if !pvc.DeletionTimestamp.IsZero() || !isBackupLabeled || inSystemNS || isExempt {
 		if err := r.cleanup(ctx, pvc.Namespace, pvc.Name); err != nil {
@@ -198,26 +282,61 @@ func backupSchedule(namespace, pvcName, label string) string {
 	return fmt.Sprintf("%d 2 * * *", minute)
 }
 
-// ensureExternalSecret is a Get-or-Create for the kopia-credentials ES.
-// Drift is NOT reconciled (we do not Update on existing). Spec is a direct
-// port of Kyverno rule 5.
+// ensureExternalSecret is a Get-or-Create for the per-PVC kopia-credentials
+// ES. Drift is NOT reconciled in steady state (we do not Update on
+// existing). EXCEPTION: v3.0.0 introduces a one-time migration helper —
+// when an ES still carries the legacy `KOPIA_REPOSITORY: filesystem:///repository`
+// shape from v2.x, the reconciler deletes and recreates it in the new S3
+// shape on the next reconcile pass. This is the ONLY drift correction the
+// reconciler performs, and it exists solely so the v2.x → v3.0.0 cutover
+// doesn't require manual `kubectl delete externalsecret` for every PVC.
+//
+// After every existing volsync-* ES has been recycled (one reconcile cycle
+// per labeled PVC), the migration is a no-op and stays that way. The
+// recycled ES will cause ESO to refresh the underlying Secret with the new
+// S3 env vars (KOPIA_REPOSITORY=s3://<bucket>, KOPIA_S3_ENDPOINT, …); on
+// VolSync mover Jobs' next run they pick up the new Secret values and
+// connect to S3 instead of the legacy NFS mount.
 func (r *PVCReconciler) ensureExternalSecret(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
 	name := "volsync-" + pvc.Name
-	if exists, err := r.exists(ctx, esGVK, pvc.Namespace, name); err != nil || exists {
+
+	// One-time migration: legacy filesystem-shaped ES → S3 shape.
+	if recycle, err := r.legacyESNeedsRecycle(ctx, pvc.Namespace, name); err != nil {
 		return err
+	} else if recycle {
+		log.FromContext(ctx).Info("recycling legacy filesystem-shaped ExternalSecret to S3 shape (v3.0.0 migration)",
+			"namespace", pvc.Namespace, "name", name)
+		stale := &unstructured.Unstructured{}
+		stale.SetGroupVersionKind(esGVK)
+		stale.SetNamespace(pvc.Namespace)
+		stale.SetName(name)
+		if err := r.Delete(ctx, stale); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete legacy ES %s/%s: %w", pvc.Namespace, name, err)
+		}
+		// Fall through to the Create below.
+	} else {
+		// Steady-state Get-or-Create: skip if already present in v3 shape.
+		if exists, err := r.exists(ctx, esGVK, pvc.Namespace, name); err != nil || exists {
+			return err
+		}
 	}
 
+	cfg := r.ExternalSecret
 	es := newUnstructured(esGVK, pvc.Namespace, name, pvc.Name)
 	es.Object["spec"] = map[string]interface{}{
-		"refreshInterval": "1h",
+		esFieldRefreshInterval: "1h",
 		"secretStoreRef": map[string]interface{}{
-			"kind": "ClusterSecretStore",
-			"name": "1password",
+			"kind":      "ClusterSecretStore",
+			esFieldName: cfg.SecretStoreName,
 		},
-		"target": map[string]interface{}{
-			"name":           name,
-			"creationPolicy": "Owner",
-			"template": map[string]interface{}{
+		esFieldTarget: map[string]interface{}{
+			esFieldName:           name,
+			esFieldCreationPolicy: creationPolicyOwner,
+			// Retain on ES delete: the rendered Secret is consumed by
+			// VolSync mover Jobs that may outlive the ES. Pre-v3 left
+			// this default (Delete); v3 makes it explicit.
+			"deletionPolicy": "Retain",
+			esFieldTemplate: map[string]interface{}{
 				"engineVersion": "v2",
 				"mergePolicy":   "Merge",
 				"metadata": map[string]interface{}{
@@ -226,23 +345,77 @@ func (r *PVCReconciler) ensureExternalSecret(ctx context.Context, pvc *corev1.Pe
 						pvcLabel:       pvc.Name,
 					},
 				},
+				// Mover Jobs read these env vars directly. Bucket name is
+				// embedded in the URL so kopia infers backend=s3.
 				dataField: map[string]interface{}{
-					"KOPIA_REPOSITORY": "filesystem:///repository",
-					"KOPIA_FS_PATH":    "/repository",
+					kopiaEnvRepository:   "s3://" + cfg.S3Bucket,
+					kopiaEnvS3Endpoint:   cfg.S3Endpoint,
+					kopiaEnvS3Bucket:     cfg.S3Bucket,
+					kopiaEnvS3DisableTLS: boolToString(cfg.S3DisableTLS),
 				},
 			},
 		},
 		dataField: []interface{}{
-			map[string]interface{}{
-				"secretKey": "KOPIA_PASSWORD",
-				"remoteRef": map[string]interface{}{
-					"key":      "rustfs",
-					"property": "kopia_password",
-				},
-			},
+			esRemoteRef(kopiaEnvPassword, cfg.VaultKey, cfg.KopiaPasswordProperty),
+			esRemoteRef(awsEnvAccessKeyID, cfg.VaultKey, cfg.S3AccessKeyProperty),
+			esRemoteRef(awsEnvSecretAccessKey, cfg.VaultKey, cfg.S3SecretKeyProperty),
 		},
 	}
 	return r.Create(ctx, es)
+}
+
+// esRemoteRef returns one entry of the ExternalSecret `spec.data` list — a
+// `secretKey` plus a `remoteRef` pointing at one (key, property) pair in the
+// configured secret store. Extracted into a helper so the three identical
+// shapes in ensureExternalSecret read cleanly and so a future ES schema
+// change (e.g. ExternalSecretsV1Beta1 deprecating `remoteRef` keys) is a
+// one-place edit.
+func esRemoteRef(secretKey, storeKey, property string) map[string]interface{} {
+	return map[string]interface{}{
+		esFieldSecretKey: secretKey,
+		esFieldRemoteRef: map[string]interface{}{
+			esFieldKey:      storeKey,
+			esFieldProperty: property,
+		},
+	}
+}
+
+// legacyESNeedsRecycle returns true when an ExternalSecret with the given
+// name exists and still carries the v2.x filesystem template shape
+// (KOPIA_REPOSITORY=filesystem:///repository). Used by ensureExternalSecret
+// to drive the one-time v2→v3 migration delete-and-recreate.
+//
+// We deliberately key off the literal "filesystem://" prefix rather than the
+// full string so a partially-migrated ES (e.g. an operator hand-edit that
+// adjusted KOPIA_FS_PATH but left KOPIA_REPOSITORY) is still detected as
+// legacy and recycled.
+func (r *PVCReconciler) legacyESNeedsRecycle(ctx context.Context, namespace, name string) (bool, error) {
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(esGVK)
+	if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, got); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	repo, _, err := unstructured.NestedString(got.Object, "spec", "target", "template", "data", "KOPIA_REPOSITORY")
+	if err != nil {
+		// Field is the wrong type; nothing we can do beyond letting the
+		// next ensure cycle attempt a Create (which will fail with already
+		// exists). Treat as non-recycle to avoid clobbering a hand-edited ES.
+		return false, nil
+	}
+	return strings.HasPrefix(repo, "filesystem://"), nil
+}
+
+// boolToString renders a Go bool as the lowercase "true"/"false" string the
+// ExternalSecret template data map needs. Centralized so a future flip to
+// numeric "1"/"0" or capital "True"/"False" only changes one place.
+func boolToString(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
 }
 
 // ensureReplicationSource is a Get-or-Create for the backup schedule.

@@ -108,11 +108,12 @@ The 2-hour wait is deliberate — it stops us from backing up a half-restored vo
 
 When the PVC gets deleted (or unlabeled, or moved into a system namespace, or labeled `backup-exempt: "true"`), the reconciler reaps the three companion resources by label. No orphan-reaper CronJob needed.
 
-The three admission webhooks each have a different job:
+The two admission webhooks each have a different job:
 
 - **`/mutate-v1-pvc`** — when a backup-labeled PVC is created and Kopia already has snapshots for that namespace+name, inject `dataSourceRef` so Longhorn populates the new PV from the snapshot. **This is the killer feature.**
-- **`/validate-v1-pvc`** — fail-closed safety net. If Kopia can't tell us whether a backup exists (network blip, NFS unreachable, etc.), deny the PVC create rather than risk admitting an empty volume over restorable data.
-- **`/mutate-batch-v1-job`** — VolSync mover Jobs need `/repository` mounted from NFS to reach the Kopia repo. We inject the volume + per-container mount transparently. Replaces what used to be a Kyverno NFS-inject policy.
+- **`/validate-v1-pvc`** — fail-closed safety net. If Kopia can't tell us whether a backup exists (network blip, S3 unreachable, etc.), deny the PVC create rather than risk admitting an empty volume over restorable data.
+
+> v3.0.0 removed a third webhook (`/mutate-batch-v1-job`) that injected an NFS volume into VolSync mover Jobs. With the Kopia repo on S3 there's no shared volume to inject — see CHANGELOG v3.0.0 for the full story.
 
 For the full architectural deep dive, including sequence diagrams of the create + restore paths, see **[`docs/architecture.md`](docs/architecture.md)**.
 
@@ -216,34 +217,27 @@ docker run -p 8080:8080 \
   -e S3_ACCESS_KEY=your-access-key \
   -e S3_SECRET_KEY=your-secret-key \
   -e S3_SECURE=false \
-  ghcr.io/mitchross/pvc-plumber:2.0.0
+  ghcr.io/mitchross/pvc-plumber:3.0.0
 ```
 
-### Kopia Filesystem Backend
+### Kopia (S3) Backend
 
 ```bash
 docker run -p 8080:8080 \
   -e OPERATOR_MODE=false \
-  -e BACKEND_TYPE=kopia-fs \
-  -e KOPIA_REPOSITORY_PATH=/repository \
+  -e BACKEND_TYPE=kopia-s3 \
+  -e KOPIA_S3_ENDPOINT=http://192.168.10.133:30293 \
+  -e KOPIA_S3_BUCKET=volsync-kopia \
+  -e KOPIA_S3_DISABLE_TLS=true \
+  -e AWS_ACCESS_KEY_ID=your-access-key \
+  -e AWS_SECRET_ACCESS_KEY=your-secret-key \
   -e KOPIA_PASSWORD=your-repository-password \
-  -v /path/to/nfs/repo:/repository:ro \
-  ghcr.io/mitchross/pvc-plumber:2.0.0
+  ghcr.io/mitchross/pvc-plumber:3.0.0
 ```
 
-### v1 (legacy) image
-
-If you're not ready to bump to `2.0.0` yet, the last stable v1 release
-remains available:
-
-```bash
-docker run -p 8080:8080 \
-  -e BACKEND_TYPE=kopia-fs \
-  -e KOPIA_REPOSITORY_PATH=/repository \
-  -e KOPIA_PASSWORD=your-repository-password \
-  -v /path/to/nfs/repo:/repository:ro \
-  ghcr.io/mitchross/pvc-plumber:1.7.0
-```
+> **v2.x users:** the `kopia-fs` filesystem backend is gone in v3. See the
+> CHANGELOG `[3.0.0]` migration guide for the cutover steps. The last
+> filesystem-mount image is `ghcr.io/mitchross/pvc-plumber:2.1.1`.
 
 ## API Documentation
 
@@ -271,7 +265,7 @@ curl http://localhost:8080/exists/karakeep/data-pvc
   "authoritative": true,
   "namespace": "karakeep",
   "pvc": "data-pvc",
-  "backend": "kopia-fs",
+  "backend": "kopia-s3",
   "source": "data-pvc-backup@karakeep:/data"
 }
 ```
@@ -284,7 +278,7 @@ curl http://localhost:8080/exists/karakeep/data-pvc
   "authoritative": true,
   "namespace": "karakeep",
   "pvc": "data-pvc",
-  "backend": "kopia-fs",
+  "backend": "kopia-s3",
   "source": "data-pvc-backup@karakeep:/data"
 }
 ```
@@ -297,7 +291,7 @@ curl http://localhost:8080/exists/karakeep/data-pvc
   "authoritative": false,
   "namespace": "karakeep",
   "pvc": "data-pvc",
-  "backend": "kopia-fs",
+  "backend": "kopia-s3",
   "source": "data-pvc-backup@karakeep:/data",
   "error": "failed to list snapshots: exit status 1"
 }
@@ -347,9 +341,9 @@ pvc_plumber_requests_total 42
 pvc_plumber_requests_errors_total 0
 # HELP pvc_plumber_backup_check_total Total number of backup check results by backend and decision
 # TYPE pvc_plumber_backup_check_total counter
-pvc_plumber_backup_check_total{backend="kopia-fs",decision="restore"} 17
-pvc_plumber_backup_check_total{backend="kopia-fs",decision="fresh"} 3
-pvc_plumber_backup_check_total{backend="kopia-fs",decision="unknown"} 0
+pvc_plumber_backup_check_total{backend="kopia-s3",decision="restore"} 17
+pvc_plumber_backup_check_total{backend="kopia-s3",decision="fresh"} 3
+pvc_plumber_backup_check_total{backend="kopia-s3",decision="unknown"} 0
 # HELP pvcplumber_exists_singleflight_dedup_total Total number of /exists requests whose result was shared from an in-flight identical lookup (singleflight follower)
 # TYPE pvcplumber_exists_singleflight_dedup_total counter
 pvcplumber_exists_singleflight_dedup_total 0
@@ -363,7 +357,7 @@ All configuration is done via environment variables.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `BACKEND_TYPE` | No | `s3` | Backend type: `s3` or `kopia-fs` |
+| `BACKEND_TYPE` | No | `s3` | Backend type: `s3` or `kopia-s3` |
 | `HTTP_TIMEOUT` | No | `3s` | Per-request backend timeout for `/exists` checks (e.g., `5s`, `500ms`) |
 | `CACHE_TTL` | No | `60s` | Cache TTL for backup existence checks (e.g., `30s`, `2m`) |
 | `PORT` | No | `8080` | HTTP server port |
@@ -381,16 +375,39 @@ Required when `BACKEND_TYPE=s3` (or not set):
 | `S3_SECRET_KEY` | Yes | - | S3 secret access key |
 | `S3_SECURE` | No | `false` | Use HTTPS for S3 connection |
 
-### Kopia Backend Settings
+### Kopia (S3) Backend Settings
 
-Required when `BACKEND_TYPE=kopia-fs`:
+Required when `BACKEND_TYPE=kopia-s3`:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `KOPIA_REPOSITORY_PATH` | No | `/repository` | Path to Kopia repository (must exist) |
-| `KOPIA_PASSWORD` | Yes | - | Repository password (from secret) |
+| `KOPIA_S3_ENDPOINT` | Yes | - | S3 endpoint URL (e.g. `http://192.168.10.133:30293` for in-cluster RustFS) |
+| `KOPIA_S3_BUCKET` | Yes | - | S3 bucket name (e.g. `volsync-kopia`) |
+| `KOPIA_S3_DISABLE_TLS` | No | `false` | Set `true` for plaintext-HTTP endpoints (in-cluster RustFS) |
+| `AWS_ACCESS_KEY_ID` | Yes | - | S3 access key (matches the credentials VolSync mover Jobs use) |
+| `AWS_SECRET_ACCESS_KEY` | Yes | - | S3 secret key (matches the credentials VolSync mover Jobs use) |
+| `KOPIA_PASSWORD` | Yes | - | Repository password — same password used when the Kopia repo was created by VolSync |
 
-**Note:** The Kopia filesystem backend requires the `kopia` binary to be available in the container and the repository path to be mounted (typically via NFS). The password is used to decrypt the repository - this is the same password used when the repository was created by VolSync.
+**Note:** The Kopia S3 backend requires the `kopia` binary to be available
+in the container. v3.0.0 dropped the filesystem-backed kopia repo
+(`KOPIA_REPOSITORY_PATH` + NFS mount) — the operator now connects to S3
+the same way VolSync mover Jobs do, so there is no shared volume between
+operator and movers. See CHANGELOG `[3.0.0]` for the migration guide.
+
+### ExternalSecret Rendering Settings
+
+These knobs configure how the PVC reconciler templates each per-PVC
+`volsync-<pvc>` ExternalSecret. Defaults match the reference cluster's
+1Password Connect layout. Override only if your secret store uses
+different names.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EXTERNAL_SECRETS_STORE_NAME` | `1password` | The `ClusterSecretStore` name the rendered ES references |
+| `EXTERNAL_SECRETS_VAULT_KEY` | `rustfs` | The remoteRef.key — secret store item that holds the kopia password and S3 admin keys |
+| `EXTERNAL_SECRETS_KOPIA_PASSWORD_PROPERTY` | `kopia_password` | Property name for `KOPIA_PASSWORD` |
+| `EXTERNAL_SECRETS_S3_ACCESS_KEY_PROPERTY` | `k8s-admin-access-key` | Property name for `AWS_ACCESS_KEY_ID` |
+| `EXTERNAL_SECRETS_S3_SECRET_KEY_PROPERTY` | `k8s-admin-secret-key` | Property name for `AWS_SECRET_ACCESS_KEY` |
 
 ## Kubernetes Deployment Examples
 
@@ -466,16 +483,16 @@ spec:
             - ALL
 ```
 
-### Kopia Filesystem Backend Deployment
+### Kopia (S3) Backend Deployment
 
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: pvc-plumber
-  namespace: kube-system
+  namespace: volsync-system
 spec:
-  replicas: 1  # Single replica recommended for NFS
+  replicas: 2
   selector:
     matchLabels:
       app: pvc-plumber
@@ -486,26 +503,38 @@ spec:
     spec:
       containers:
       - name: pvc-plumber
-        image: ghcr.io/mitchross/pvc-plumber:1.5.1  # Must include kopia binary
+        image: ghcr.io/mitchross/pvc-plumber:3.0.0  # Must include kopia binary
         ports:
         - containerPort: 8080
           name: http
+        - containerPort: 9443
+          name: webhook
         env:
         - name: BACKEND_TYPE
-          value: "kopia-fs"
-        - name: KOPIA_REPOSITORY_PATH
-          value: "/repository"
+          value: "kopia-s3"
+        - name: KOPIA_S3_ENDPOINT
+          value: "http://192.168.10.133:30293"
+        - name: KOPIA_S3_BUCKET
+          value: "volsync-kopia"
+        - name: KOPIA_S3_DISABLE_TLS
+          value: "true"
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: pvc-plumber-kopia
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: pvc-plumber-kopia
+              key: AWS_SECRET_ACCESS_KEY
         - name: KOPIA_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: volsync-kopia-secret
+              name: pvc-plumber-kopia
               key: KOPIA_PASSWORD
         - name: LOG_LEVEL
           value: "info"
-        volumeMounts:
-        - name: repository
-          mountPath: /repository
-          readOnly: true
         livenessProbe:
           httpGet:
             path: /healthz
@@ -521,10 +550,10 @@ spec:
         resources:
           requests:
             cpu: 10m
-            memory: 32Mi
+            memory: 128Mi
           limits:
-            cpu: 100m
-            memory: 64Mi
+            cpu: 500m
+            memory: 512Mi
         securityContext:
           allowPrivilegeEscalation: false
           runAsNonRoot: true
@@ -533,17 +562,12 @@ spec:
           capabilities:
             drop:
             - ALL
-      volumes:
-      - name: repository
-        nfs:
-          server: 192.168.10.133
-          path: /mnt/BigTank/k8s/volsync-kopia-nfs
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: pvc-plumber
-  namespace: kube-system
+  namespace: volsync-system
 spec:
   selector:
     app: pvc-plumber
@@ -551,6 +575,9 @@ spec:
   - port: 8080
     targetPort: http
     name: http
+  - port: 9443
+    targetPort: webhook
+    name: webhook
 ```
 
 ## Kyverno Integration Example
@@ -695,9 +722,9 @@ The service is composed of four main components:
 - Performs ListObjects with prefix `{namespace}/{pvc}/`
 - Supports AWS Signature Version 4 authentication
 
-**Kopia Backend:**
+**Kopia (S3) Backend:**
 - Shells out to `kopia` CLI binary
-- Connects to repository at startup: `kopia repository connect filesystem --path /repository`
+- Connects to repository at startup: `kopia repository connect s3 --endpoint <…> --bucket <…> --access-key <…> --secret-access-key <…> --password <…> [--disable-tls]`
 - Pre-warms cache: `kopia snapshot list --all --json` scans all snapshots in one call
 - Per-request checks are served from cache (sub-millisecond). Cache misses fall back to `kopia snapshot list "{pvc}-backup@{namespace}" --json`
 - Cache TTL is configurable (default 60s)
@@ -709,7 +736,7 @@ The service is composed of four main components:
 - Go 1.25 or later
 - Docker (optional, for building images)
 - Make (optional, for using Makefile targets)
-- kopia binary (for testing kopia-fs backend)
+- kopia binary (for testing kopia-s3 backend)
 
 ### Build and Run
 
@@ -731,9 +758,13 @@ S3_ACCESS_KEY=minioadmin \
 S3_SECRET_KEY=minioadmin \
 ./pvc-plumber
 
-# Run with Kopia backend
-BACKEND_TYPE=kopia-fs \
-KOPIA_REPOSITORY_PATH=/path/to/repo \
+# Run with Kopia (S3) backend
+BACKEND_TYPE=kopia-s3 \
+KOPIA_S3_ENDPOINT=http://192.168.10.133:30293 \
+KOPIA_S3_BUCKET=volsync-kopia \
+KOPIA_S3_DISABLE_TLS=true \
+AWS_ACCESS_KEY_ID=your-access-key \
+AWS_SECRET_ACCESS_KEY=your-secret-key \
 KOPIA_PASSWORD=your-repository-password \
 ./pvc-plumber
 ```
@@ -781,13 +812,14 @@ curl http://localhost:8080/exists/my-namespace/my-pvc
 | "Access Denied" | Verify credentials and bucket permissions |
 | Timeout errors | Increase `HTTP_TIMEOUT`, check network |
 
-**Kopia Backend:**
+**Kopia (S3) Backend:**
 
 | Issue | Solution |
 |-------|----------|
-| "KOPIA_REPOSITORY_PATH does not exist" | Verify NFS mount is available |
-| "failed to connect to kopia repository" | Check repository path and permissions |
-| "kopia: command not found" | Ensure kopia binary is in container |
+| "KOPIA_S3_ENDPOINT is required for kopia-s3 backend" | Set all required env vars (`KOPIA_S3_ENDPOINT`, `KOPIA_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `KOPIA_PASSWORD`) |
+| "failed to connect to kopia repository" | Verify the bucket exists, credentials are valid, and the endpoint is reachable from the pod |
+| "kopia: command not found" | Ensure kopia binary is in the container image |
+| `connection refused` to RustFS endpoint | If the endpoint is plaintext-HTTP, set `KOPIA_S3_DISABLE_TLS=true` |
 
 ## Security
 

@@ -4,6 +4,15 @@
 > `1.7.0`) who is about to bump to `2.0.0`.
 > If you are deploying to a fresh cluster, jump straight to
 > [Option A](#option-a--fresh-cluster).
+>
+> **Already on v2.x and looking at v3.0.0?** The v2 → v3 cutover is much
+> smaller in scope: drop the `mutate-batch-v1-job` webhook, switch the
+> Kopia repo from filesystem to S3, no RBAC changes, no new cluster
+> dependencies. The full migration guide lives in
+> [`CHANGELOG.md`](CHANGELOG.md) under `[3.0.0] § Migration guide`. Quirks
+> #1, #2, and #3 in [§ 5 below](#5-known-v2-quirks-fixed-in-v3) are
+> resolved in v3.0.0 (the `1password` / `rustfs` / `kopia_password`
+> hardcodes became env-var-overridable defaults).
 
 ---
 

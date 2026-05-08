@@ -15,6 +15,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-05-08
+
+> 🚨 **THIS IS A MAJOR BREAKING RELEASE.** The deployment surface changes
+> substantially: the third admission webhook (`mutate-batch-v1-job`) is
+> removed entirely, and the Kopia repository backend switches from
+> filesystem (NFS-mounted at `/repository`) to S3 (RustFS or any
+> S3-compatible store). Image: `ghcr.io/mitchross/pvc-plumber:3.0.0`.
+>
+> **Why this is breaking, in one paragraph.** The v2.x `JobMutator` injected
+> an NFS volume into VolSync mover Jobs at admission time. VolSync's mover
+> reconciler computes a "desired" Job spec WITHOUT the injected volume,
+> sees the actual Job spec HAS it, tries to update (Jobs are immutable
+> after creation), gets an immutable-field error, and falls back to
+> `CreateOrUpdateDeleteOnImmutableErr` — which deletes the running Job and
+> recreates it. The recreated Job goes through admission again, gets the
+> volume injected, drift detected, delete + recreate. Tight loop. The
+> 2026-05-08 cluster outage was caused by this race firing for seven
+> backup-labeled PVCs simultaneously. The fix: stop injecting volumes at
+> admission time, ship S3-backed Kopia instead. The whole class of
+> admission-vs-reconciler races disappears because mover Jobs need no
+> shared volume.
+
+### Removed (BREAKING)
+
+- 🚨 **`JobMutator` admission webhook deleted.** The third handler at
+  `/mutate-batch-v1-job` is gone permanently. The operator no longer
+  registers the route, the handler source files (`internal/webhook/job_mutate.go`
+  and its test) are deleted, and the consuming cluster's
+  `MutatingWebhookConfiguration` should drop the `mutate-job.pvc-plumber.io`
+  entry. Cluster operators upgrading from v2.x to v3.0.0 MUST also delete
+  the existing `mutate-job.pvc-plumber.io` webhook entry from
+  `MutatingWebhookConfiguration` — leaving it in place against the v3
+  operator means admission requests for `/mutate-batch-v1-job` will return
+  `404 not found`, and with `failurePolicy: Ignore` (its v2 default) those
+  admissions will silently succeed without injection. That's safe but
+  cosmetically wrong; remove it.
+- 🚨 **`NFS_SERVER` and `NFS_PATH` env vars removed** from the operator
+  Deployment. They were JobMutator coordinates and have no successor.
+  Setting them is harmless (the operator ignores them) but they should
+  be removed from the Deployment manifest as part of the migration.
+- 🚨 **`KOPIA_REPOSITORY_PATH` env var removed.** The operator no longer
+  connects to a filesystem-backed Kopia repo, so there's no path to point
+  it at. Replaced by the S3 connection env-var quartet (see Added below).
+- 🚨 **`BACKEND_TYPE=kopia-fs` token renamed to `kopia-s3`.** Anything
+  scraping Prometheus `pvc_plumber_backup_check_total{backend="…"}` or
+  filtering logs by backend label needs the new token. The wire format
+  of `/exists/{ns}/{pvc}` JSON also changes its `backend` field
+  accordingly (`"backend": "kopia-s3"`).
+- 🚨 **The legacy `repository` NFS volume + `/repository` mount on the
+  operator Deployment are gone.** The operator pod no longer needs any
+  shared volume — kopia talks to RustFS (or any S3 endpoint) over the
+  network the same way VolSync mover Jobs do.
+
+### Added
+
+- **S3-backed Kopia repository for the operator's own client.** The
+  operator's existence-check Kopia subprocess now invokes
+  `kopia repository connect s3 --endpoint --bucket --access-key
+  --secret-access-key --password [--disable-tls]`. New env vars:
+  `KOPIA_S3_ENDPOINT`, `KOPIA_S3_BUCKET`, `KOPIA_S3_DISABLE_TLS`,
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `KOPIA_PASSWORD`. The
+  operator-side credentials are reused 1:1 for the per-PVC kopia-credentials
+  Secret the reconciler creates, so secret material has a single source of
+  truth.
+- **Configurable per-PVC ExternalSecret rendering** (resolves v2 quirks
+  #1, #2, #3 from `MIGRATION-v1-to-v2.md` § 5). New env vars on the
+  operator Deployment, all defaulted to the reference cluster's 1Password
+  Connect layout:
+  - `EXTERNAL_SECRETS_STORE_NAME` (default `1password`)
+  - `EXTERNAL_SECRETS_VAULT_KEY` (default `rustfs`)
+  - `EXTERNAL_SECRETS_KOPIA_PASSWORD_PROPERTY` (default `kopia_password`)
+  - `EXTERNAL_SECRETS_S3_ACCESS_KEY_PROPERTY` (default `k8s-admin-access-key`)
+  - `EXTERNAL_SECRETS_S3_SECRET_KEY_PROPERTY` (default `k8s-admin-secret-key`)
+- **One-time v2 → v3 ExternalSecret migration helper.** The reconciler
+  is normally `Get-or-Create` (no drift correction), but v3.0.0 adds a
+  single drift-correct path: when an existing `volsync-<pvc>` ES still
+  carries the legacy `KOPIA_REPOSITORY: filesystem:///repository` template,
+  the reconciler **deletes and recreates** it in the new S3 shape on the
+  next reconcile. This is the ONLY drift correction the reconciler
+  performs; once every legacy ES has been recycled (one reconcile cycle
+  per labeled PVC) the migration is a no-op and stays that way. After the
+  recycle, ESO refreshes the rendered Secret with the new env vars
+  (KOPIA_REPOSITORY=s3://…, KOPIA_S3_ENDPOINT, KOPIA_S3_BUCKET,
+  KOPIA_S3_DISABLE_TLS, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+  KOPIA_PASSWORD); on VolSync mover Jobs' next scheduled run they pick
+  up the new Secret values and connect to S3 instead of the legacy NFS
+  share.
+
+### Changed
+
+- **Per-PVC `volsync-<pvc>` ExternalSecret schema** carries three
+  remoteRefs now (`KOPIA_PASSWORD`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`) instead of one, plus four template `data`
+  entries (`KOPIA_REPOSITORY=s3://<bucket>`, `KOPIA_S3_ENDPOINT`,
+  `KOPIA_S3_BUCKET`, `KOPIA_S3_DISABLE_TLS`). Anyone consuming the
+  rendered `volsync-<pvc>` Secret outside of VolSync mover Jobs needs to
+  read the new keys. The ES `target.deletionPolicy` is now explicitly
+  `Retain` so a deleted ES doesn't drag the rendered Secret down with it
+  while a mover Job is mid-flight.
+- **Cluster manifest defaults** (in `infrastructure/controllers/pvc-plumber/`
+  in the consuming GitOps repo) updated for the S3 deployment shape: NFS
+  volume + mount removed, NFS env vars removed, S3 env vars added pulling
+  from the operator's own `pvc-plumber-kopia` Secret, the Deployment image
+  bumped to `:3.0.0`, the `mutate-job.pvc-plumber.io` webhook entry
+  deleted from `webhooks.yaml`, and the operator's own `pvc-plumber-kopia`
+  ExternalSecret extended with `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` mapped from the `rustfs` 1Password item's
+  `k8s-admin-access-key` / `k8s-admin-secret-key` properties.
+
+### Migration guide
+
+For any cluster running v2.x, do these three things in one PR:
+
+1. Bump the Deployment image to `:3.0.0`. Drop `NFS_SERVER`, `NFS_PATH`,
+   `KOPIA_REPOSITORY_PATH`, `BACKEND_TYPE=kopia-fs`. Add `BACKEND_TYPE=kopia-s3`,
+   `KOPIA_S3_ENDPOINT`, `KOPIA_S3_BUCKET`, `KOPIA_S3_DISABLE_TLS`,
+   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`. Drop the `repository`
+   NFS volume + `/repository` mount.
+2. Extend the operator's own `pvc-plumber-kopia` ExternalSecret to pull
+   `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` from the same secret
+   store item the kopia password lives in.
+3. Delete the `mutate-job.pvc-plumber.io` webhook from your
+   `MutatingWebhookConfiguration`. Keep the two PVC webhooks
+   (`mutate-pvc.pvc-plumber.io`, `validate-pvc.pvc-plumber.io`) and the
+   `validate-pvc-exempt.pvc-plumber.io` entry untouched — those still
+   work the same way.
+
+After the operator is healthy on `:3.0.0`, every existing
+`volsync-<pvc>` ExternalSecret will be recycled by the migration helper
+on the next per-PVC reconcile (typically within one minute of pod
+readiness). The rendered `volsync-<pvc>` Secret will contain the new
+S3 keys; VolSync's next mover Job run will use them automatically.
+
+There is no kopia repository data migration. The Kopia snapshots stay
+where they are — if your repo was on NFS and you point the new operator
+at an S3 bucket, the snapshots are not in that bucket. To carry over
+existing snapshots, run `kopia repository sync-to s3 --endpoint=…` from
+a machine that has the NFS share mounted, BEFORE switching the operator
+over. For this cluster, the cutover skipped that step (recent volsync
+backups had been broken since 2026-05-08 anyway, and DR drills had
+already validated alternate recovery paths).
+
+### Rollback
+
+Pin the Deployment image to `:2.1.1`, restore the NFS volume + mount,
+restore the NFS env vars, restore the `BACKEND_TYPE=kopia-fs` env var,
+restore `KOPIA_REPOSITORY_PATH=/repository`, re-add the
+`mutate-job.pvc-plumber.io` webhook (but with the
+`pvc-plumber.io/emergency-disabled: 2026-05-08` objectSelector to keep
+it dormant), and accept that backup-labeled PVCs created from this
+point on will get the v3 ES shape recycled into the v2 shape only on
+PVC recreate (the operator does not currently downgrade-migrate ESes —
+that's not on the roadmap because the v2 shape is gone permanently
+once you cut over).
+
+---
+
 ## [2.1.1] — 2026-05-07
 
 ### Fixed
@@ -223,6 +380,9 @@ and tags `v1.0.0` through `v1.7.0`.
 
 ---
 
-[Unreleased]: https://github.com/mitchross/pvc-plumber/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/mitchross/pvc-plumber/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/mitchross/pvc-plumber/compare/v2.1.1...v3.0.0
+[2.1.1]: https://github.com/mitchross/pvc-plumber/compare/v2.1.0...v2.1.1
+[2.1.0]: https://github.com/mitchross/pvc-plumber/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/mitchross/pvc-plumber/compare/v1.7.0...v2.0.0
 [1.7.0]: https://github.com/mitchross/pvc-plumber/releases/tag/v1.7.0

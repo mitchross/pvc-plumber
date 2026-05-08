@@ -42,7 +42,7 @@ func (m *deadlineCapturingBackend) CheckBackupExists(ctx context.Context, namesp
 		Authoritative: true,
 		Namespace:     namespace,
 		Pvc:           pvc,
-		Backend:       backend.TypeKopiaFS,
+		Backend:       backend.TypeKopiaS3,
 	}
 }
 
@@ -87,13 +87,13 @@ func TestHandleExists(t *testing.T) {
 				Authoritative: true,
 				Namespace:     testNamespace,
 				Pvc:           testPVC,
-				Backend:       backend.TypeKopiaFS,
+				Backend:       backend.TypeKopiaS3,
 			},
 			wantStatus:        http.StatusOK,
 			wantExists:        false,
 			wantDecision:      backend.DecisionFresh,
 			wantAuthoritative: true,
-			wantBackend:       backend.TypeKopiaFS,
+			wantBackend:       backend.TypeKopiaS3,
 			wantError:         false,
 		},
 		{

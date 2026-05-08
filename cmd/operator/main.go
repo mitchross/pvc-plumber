@@ -1,13 +1,13 @@
-// Command operator is the controller-runtime entrypoint for pvc-plumber v2.
+// Command operator is the controller-runtime entrypoint for pvc-plumber.
 //
-// Phase 3: this binary now wires the PVC reconciler and three admission
-// webhook handlers (PVCMutator, PVCValidator, JobMutator) onto a real
-// controller-runtime manager, sharing one in-process backend + cache
-// instance with the legacy read-only HTTP server. The OPERATOR_MODE=true
-// feature flag is the rollout gate — when unset, the binary behaves like
-// the legacy cmd/pvc-plumber server (HTTP-only, no manager) so we can
-// deploy this image as a drop-in before flipping the cluster onto the
-// admission webhooks.
+// As of v3.0.0 this binary wires the PVC reconciler and TWO admission
+// webhook handlers (PVCMutator, PVCValidator) onto a real controller-runtime
+// manager, sharing one in-process backend + cache instance with the legacy
+// read-only HTTP server. The third handler (JobMutator) was removed in
+// v3.0.0 — see CHANGELOG. The OPERATOR_MODE=true feature flag is the rollout
+// gate — when unset, the binary behaves like the legacy cmd/pvc-plumber
+// server (HTTP-only, no manager) so we can deploy this image as a drop-in
+// before flipping the cluster onto the admission webhooks.
 //
 // Lifecycle: signal.NotifyContext drives a single cancellation context.
 // When SIGTERM/SIGINT lands, the HTTP server, cache re-warm loop, and
@@ -125,10 +125,9 @@ func main() {
 	slogger := buildSlogger(cfg.LogLevel)
 	slog.SetDefault(slogger)
 
-	// Operator-specific env. The defaults below match the production cluster
-	// (NFS_SERVER, NFS_PATH) and the canonical 9-entry exclusion list.
-	nfsServer := envOr("NFS_SERVER", "192.168.10.133")
-	nfsPath := envOr("NFS_PATH", "/mnt/BigTank/k8s/volsync-kopia-nfs")
+	// Operator-specific env. v3.0.0 removed NFS_SERVER / NFS_PATH along with
+	// the JobMutator that consumed them — the operator no longer reaches into
+	// any shared filesystem mount, S3-backed Kopia handles everything.
 	sysNs := parseSystemNamespaces(os.Getenv("SYSTEM_NAMESPACES"))
 	operatorMode := os.Getenv("OPERATOR_MODE") == "true"
 
@@ -137,8 +136,6 @@ func main() {
 		"port", cfg.Port,
 		"log_level", cfg.LogLevel,
 		"operator_mode", operatorMode,
-		"nfs_server", nfsServer,
-		"nfs_path", nfsPath,
 		"system_namespaces", systemNamespacesForLog(sysNs),
 	)
 
@@ -189,7 +186,7 @@ func main() {
 		return nil
 	})
 
-	// 2. Cache re-warm loop (kopia-fs only). Identical cadence to the
+	// 2. Cache re-warm loop (kopia-s3 only). Identical cadence to the
 	//    legacy binary; ctx cancellation stops it within one tick.
 	if bundle.kopia != nil && cfg.ReWarmInterval > 0 {
 		g.Go(func() error {
@@ -209,9 +206,8 @@ func main() {
 				gctx,
 				slogger,
 				bundle,
+				cfg,
 				sysNs,
-				nfsServer,
-				nfsPath,
 				metricsAddr, probeAddr,
 				webhookPort, webhookCertDir,
 				enableLeaderElection, leaderElectionID,
@@ -229,9 +225,15 @@ func main() {
 }
 
 // runManager builds the controller-runtime manager, registers the PVC
-// reconciler, wires the three admission webhook handlers against the
+// reconciler, wires the two PVC admission webhook handlers against the
 // shared backend, and blocks on mgr.Start until ctx cancels. Errors are
 // returned so the parent errgroup can drive the unified shutdown.
+//
+// v3.0.0: the third handler (JobMutator at /mutate-batch-v1-job) is gone
+// permanently. With the operator's Kopia repo on S3, mover Jobs no longer
+// need a shared volume injected at admission time — the volume-injection
+// approach was incompatible with VolSync's CreateOrUpdateDeleteOnImmutableErr
+// reconciler and caused a cluster-wide backup outage on 2026-05-08.
 //
 // Note: the manager's metrics + probe addresses are distinct from the
 // legacy HTTP server's port (cfg.Port) — running both on the same port
@@ -241,8 +243,8 @@ func runManager(
 	ctx context.Context,
 	slogger *slog.Logger,
 	bundle *backendBundle,
+	cfg *config.Config,
 	sysNs map[string]struct{},
-	nfsServer, nfsPath string,
 	metricsAddr, probeAddr string,
 	webhookPort int, webhookCertDir string,
 	enableLeaderElection bool, leaderElectionID string,
@@ -273,19 +275,32 @@ func runManager(
 
 	// PVC reconciler. The reconciler intentionally does NOT take a Kopia
 	// client — it only manages ES/RS/RD lifecycle and trusts admission
-	// webhooks for the actual restore decisions.
+	// webhooks for the actual restore decisions. The ExternalSecretConfig
+	// is plumbed through so the per-PVC `volsync-<pvc>` ES the reconciler
+	// renders points at the right ClusterSecretStore / vault item /
+	// property names for this deployment (defaults pin to the reference
+	// cluster's 1Password Connect layout — see internal/config).
 	if err := (&controller.PVCReconciler{
 		Client:           mgr.GetClient(),
 		SystemNamespaces: sysNs,
+		ExternalSecret: controller.ExternalSecretConfig{
+			SecretStoreName:       cfg.ExternalSecretsStoreName,
+			VaultKey:              cfg.ExternalSecretsVaultKey,
+			KopiaPasswordProperty: cfg.ExternalSecretsKopiaPasswordProperty,
+			S3AccessKeyProperty:   cfg.ExternalSecretsS3AccessKeyProperty,
+			S3SecretKeyProperty:   cfg.ExternalSecretsS3SecretKeyProperty,
+			S3Endpoint:            cfg.KopiaS3Endpoint,
+			S3Bucket:              cfg.KopiaS3Bucket,
+			S3DisableTLS:          cfg.KopiaS3DisableTLS,
+		},
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup PVCReconciler: %w", err)
 	}
 
 	// Admission webhook handlers. The decoder is built from the manager's
-	// scheme so it knows how to deserialize core/v1 PVC and batch/v1 Job
-	// payloads. All three handlers receive the same SystemNamespaces /
-	// shared cached backend, keeping behavior identical between
-	// reconcile and admission paths.
+	// scheme so it knows how to deserialize core/v1 PVC payloads. Both
+	// handlers receive the same SystemNamespaces / shared cached backend,
+	// keeping behavior identical between reconcile and admission paths.
 	decoder := admission.NewDecoder(mgr.GetScheme())
 	hookSrv := mgr.GetWebhookServer()
 	hookSrv.Register("/mutate-v1-pvc", &webhook.Admission{
@@ -302,13 +317,6 @@ func runManager(
 			SystemNamespaces: sysNs,
 		},
 	})
-	hookSrv.Register("/mutate-batch-v1-job", &webhook.Admission{
-		Handler: &pvcwebhook.JobMutator{
-			Decoder:   decoder,
-			NFSServer: nfsServer,
-			NFSPath:   nfsPath,
-		},
-	})
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add healthz: %w", err)
@@ -321,14 +329,6 @@ func runManager(
 		return fmt.Errorf("manager run: %w", err)
 	}
 	return nil
-}
-
-// envOr returns the env var value when set non-empty, otherwise fallback.
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
 
 // parseSystemNamespaces builds the SystemNamespaces set: ALWAYS the 9

@@ -67,9 +67,20 @@ func main() {
 		}
 		backendClient = s3Client
 
-	case "kopia-fs":
-		logger.Info("initializing kopia-fs backend", "path", cfg.KopiaRepositoryPath)
-		kopiaClient := kopia.NewClient(cfg.KopiaRepositoryPath, cfg.KopiaPassword, logger)
+	case "kopia-s3":
+		logger.Info("initializing kopia-s3 backend",
+			"endpoint", cfg.KopiaS3Endpoint,
+			"bucket", cfg.KopiaS3Bucket,
+			"disable_tls", cfg.KopiaS3DisableTLS,
+		)
+		kopiaClient := kopia.NewClient(kopia.S3Config{
+			Endpoint:   cfg.KopiaS3Endpoint,
+			Bucket:     cfg.KopiaS3Bucket,
+			AccessKey:  cfg.KopiaS3AccessKey,
+			SecretKey:  cfg.KopiaS3SecretKey,
+			Password:   cfg.KopiaPassword,
+			DisableTLS: cfg.KopiaS3DisableTLS,
+		}, logger)
 		if err := kopiaClient.Connect(context.Background()); err != nil {
 			logger.Error("failed to connect to kopia repository", "error", err)
 			os.Exit(1)
@@ -82,7 +93,7 @@ func main() {
 
 	// Pre-warm cache for kopia backend
 	var kopiaClient *kopia.Client
-	if cfg.BackendType == "kopia-fs" {
+	if cfg.BackendType == "kopia-s3" {
 		if kc, ok := backendClient.(*kopia.Client); ok {
 			kopiaClient = kc
 			sources, err := kc.ListAllSources(context.Background())

@@ -1,11 +1,17 @@
 // Package webhook contains admission webhook handlers for pvc-plumber.
 //
-// These handlers replace the runtime decision logic that previously lived in
-// the Kyverno ClusterPolicy `volsync-pvc-backup-restore` (rules 1, 2, 3, 4)
-// and `volsync-nfs-inject`. The PVC handlers split into a fail-OPEN mutator
-// (PVCMutator) and a fail-CLOSED validator (PVCValidator). The Job handler
-// (JobMutator) injects the shared NFS Kopia repository volume into VolSync
-// mover pods.
+// These handlers implement the runtime decision logic that previously lived
+// in the Kyverno ClusterPolicy `volsync-pvc-backup-restore` (rules 1, 2, 3,
+// 4). The PVC handlers split into a fail-OPEN mutator (PVCMutator) and a
+// fail-CLOSED validator (PVCValidator).
+//
+// v3.0.0 removed the third handler (JobMutator at /mutate-batch-v1-job).
+// JobMutator injected an NFS volume into VolSync mover Jobs at admission
+// time, which collided with VolSync's CreateOrUpdateDeleteOnImmutableErr
+// reconciler (admission injects → controller sees drift → controller
+// deletes the running Job → admission injects → ...). With the operator's
+// Kopia repo on S3, mover Jobs need no shared volume and the whole class
+// of admission-vs-reconciler races disappears. See CHANGELOG v3.0.0.
 package webhook
 
 import (
