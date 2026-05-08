@@ -15,6 +15,158 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] — 2026-05-08
+
+> **Bugfix release on top of v3.0.0.** Resolves the v3.0.0 cutover incident
+> earlier today (2026-05-08) where pvc-plumber operator pods crashed with
+> `CreateContainerConfigError` / `CrashLoopBackOff` because kubelet could
+> not resolve `secretKeyRef` env vars while the `pvc-plumber-kopia` Secret
+> was mid-update during ArgoCD sync waves. Also fixes task #30 — the
+> reconciler error-loop on PVC names exceeding the 63-byte Kubernetes
+> label-value limit. Image: `ghcr.io/mitchross/pvc-plumber:3.1.0`. Auto-
+> promotes `:3.1`, `:3`, `:latest` via the existing release workflow.
+>
+> **No deployment surface changes from v3.0.0.** RBAC, webhook
+> registration, and AppProject permissions are identical. The only
+> manifest change in the consuming GitOps repo is the operator
+> Deployment: drop the three `secretKeyRef` env vars (`KOPIA_PASSWORD`,
+> `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) and add a Secret volume
+> mount at `/var/secret/pvc-plumber-kopia` so kubelet renders each Secret
+> key as a separate file. ESO-rendered Secret data is unchanged.
+
+### Fixed
+
+- **ES-race operator pod startup deadlock.** The v3.0.0 operator read its
+  three kopia credentials (`KOPIA_PASSWORD`, `AWS_ACCESS_KEY_ID`,
+  `AWS_SECRET_ACCESS_KEY`) via `secretKeyRef` env vars at pod start. If the
+  `pvc-plumber-kopia` Secret was mid-update when the pod scheduled — the
+  exact race that fires during ArgoCD sync waves whenever the underlying
+  ExternalSecret manifest changes shape — kubelet's container env-var
+  resolver failed and the pod entered `CreateContainerConfigError` →
+  `CrashLoopBackOff`. With `failurePolicy: Fail` on the PVC validating
+  webhook, that crash-loop denied every backup-labeled PVC creation
+  cluster-wide. v3.1.0 mounts the Secret as a directory at
+  `/var/secret/pvc-plumber-kopia` (kubelet writes each Secret key as a
+  separate file) and the kopia client reads creds from disk on every
+  subprocess invocation. The pod starts cleanly regardless of Secret render
+  state — there's no kubelet-level `secretKeyRef` resolution to fail. If a
+  cred file is missing or empty when a kopia call is needed, the client
+  returns a typed `ErrCredentialsNotReady`; `Connect()` retries with
+  exponential backoff up to a 60-second cap (configurable via
+  `KOPIA_CONNECT_TIMEOUT`), and reconciler/admission paths re-queue
+  through controller-runtime's normal backoff. A Secret update from ESO
+  is observed on the next call without a pod restart.
+- **Reconciler crash on PVC names exceeding 63 bytes.** The reconciler
+  built a label selector `volsync.backup/pvc=<full-pvc-name>` for orphan
+  cleanup, which Kubernetes rejected for label values over the 63-byte
+  limit. The `prometheus-stack` namespace's `prometheus-kube-prometheus-
+  stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0` PVC
+  (104 chars) and the alertmanager equivalent (102 chars) tripped this on
+  every reconcile, error-looping the manager. Two layers of fix:
+  - **Primary**: the system-namespace check now runs at the very TOP of
+    `Reconcile()`, before any cleanup/Get/List call. The two prometheus-
+    stack PVCs that triggered the original error-loop never reach the
+    label-selector code in the first place — `prometheus-stack` is in the
+    operator's `SystemNamespaces` exclusion set, and the reconciler short-
+    circuits with no work done. Pre-v3.1.0 the system-namespace check ran
+    AFTER the on-PVC-not-found cleanup() call, so an over-long PVC name in
+    a system namespace still hit the broken selector.
+  - **Defense-in-depth**: any PVC name longer than 63 bytes (regardless of
+    namespace) is mapped to a deterministic 28-char `pvc-<sha256-prefix>`
+    label value via `labelSafePVCRef`. Children are created with the
+    hashed value and `cleanup()` selects with the same hash, so the
+    selector always validates and uniquely identifies the source PVC.
+    Existing children created against short-named PVCs keep their raw
+    names — no migration required.
+
+### Changed
+
+- **`/readyz` semantic change (behavior change worth flagging).** Pre-
+  v3.1.0 the operator's `/readyz` HTTP handler returned 200 once
+  `Connect()` had succeeded at startup; the readiness probe was
+  effectively a "did the process start" check. v3.1.0 makes `/readyz`
+  invoke `kopia.Client.HealthCheck()`, which now actually executes
+  `kopia repository status` (capped at a 5-second timeout). If the kopia
+  connection has silently broken — creds rotated out from under us, on-
+  disk session expired, S3 endpoint unreachable — the probe fails and the
+  pod is marked not-Ready. Kubelet stops routing admission webhook traffic
+  to a not-Ready pod, so this gates the `failurePolicy: Fail` PVC webhook
+  against a half-broken operator. The deployment.yaml `readinessProbe`
+  `timeoutSeconds: 15` already gives plenty of headroom for a cheap
+  status call. Operators should expect the operator pod to flap between
+  Ready and not-Ready during transient S3 incidents — that's the intended
+  signal, not a regression.
+- **Internal kopia client API.** `kopia.S3Config` no longer carries the
+  three credential strings; they're loaded lazily through a
+  `CredentialsSource` interface (`DirCredentialsSource` for v3.1.0+
+  Secret-mount deployments, `StaticCredentialsSource` for the legacy v1.x
+  HTTP-only deployment shape). `kopia.NewClient(cfg, creds, logger,
+  Options{ConnectTimeout: …})` is the new constructor signature. The
+  legacy `cmd/pvc-plumber` HTTP-only binary keeps building and runs
+  unchanged on v1.x deployments — credentials still come from env vars
+  via `StaticCredentialsSource`. Operator deployments use the dir source
+  by default.
+
+### Added
+
+- **`KOPIA_CREDENTIALS_PATH` env var** (default
+  `/var/secret/pvc-plumber-kopia`). When unset, the operator reads
+  credentials from this directory; when explicitly set to empty, it falls
+  back to env-var creds (legacy shape) so the v1.x HTTP-only deployment
+  pattern keeps working.
+- **`KOPIA_CONNECT_TIMEOUT` env var** (default `60s`). Caps the total time
+  `Connect()` spends retrying on `ErrCredentialsNotReady` before returning
+  an error and letting controller-runtime re-queue.
+- **`ErrCredentialsNotReady` typed error.** Distinguishes "creds aren't
+  rendered yet, retry" from "kopia repo is broken, fail" so the connect
+  retry loop can be conservative without masking real outages.
+
+### Migration guide
+
+For any cluster running v3.0.0:
+
+1. Bump the Deployment image to `:3.1.0`.
+2. Drop the three `valueFrom.secretKeyRef` env vars (`KOPIA_PASSWORD`,
+   `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) from the operator
+   container spec.
+3. Add a Secret volume + volumeMount:
+
+   ```yaml
+   volumes:
+     - name: kopia-credentials
+       secret:
+         secretName: pvc-plumber-kopia
+         defaultMode: 0440
+   ```
+
+   ```yaml
+   volumeMounts:
+     - name: kopia-credentials
+       mountPath: /var/secret/pvc-plumber-kopia
+       readOnly: true
+   ```
+
+The ExternalSecret + rendered Secret are unchanged. ESO continues to
+populate `KOPIA_PASSWORD`, `AWS_ACCESS_KEY_ID`, and
+`AWS_SECRET_ACCESS_KEY` keys; kubelet writes them as separate files
+under the mount directory. The mover-Job side (per-PVC `volsync-<pvc>`
+Secret + ES) is unchanged — only the OPERATOR's own Secret moves to
+the directory-mount pattern. Per-PVC mover Jobs continue to use
+`secretKeyRef` env vars; they aren't subject to the same ArgoCD sync
+race because the per-PVC ExternalSecrets are operator-rendered, not
+Argo-rendered.
+
+### Rollback
+
+Pin the Deployment image to `:3.0.0`, restore the three `secretKeyRef`
+env vars, drop the Secret volume + volumeMount. The on-disk credentials
+the v3.1.0 build wrote are stateless — there's no data to migrate back.
+Be aware that the v3.0.0 ES-race that prompted this release will
+reappear on the next sync wave; the recommended rollback target is
+`:2.1.1` if `:3.1.0` itself is found to regress something.
+
+---
+
 ## [3.0.0] — 2026-05-08
 
 > 🚨 **THIS IS A MAJOR BREAKING RELEASE.** The deployment surface changes
@@ -380,7 +532,8 @@ and tags `v1.0.0` through `v1.7.0`.
 
 ---
 
-[Unreleased]: https://github.com/mitchross/pvc-plumber/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/mitchross/pvc-plumber/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/mitchross/pvc-plumber/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/mitchross/pvc-plumber/compare/v2.1.1...v3.0.0
 [2.1.1]: https://github.com/mitchross/pvc-plumber/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/mitchross/pvc-plumber/compare/v2.0.0...v2.1.0

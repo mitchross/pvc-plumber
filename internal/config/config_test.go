@@ -61,7 +61,17 @@ var allEnvVars = []string{
 	envESStoreName, envESVaultKey, envESKopiaPasswordProperty,
 	envESS3AccessKeyProperty, envESS3SecretKeyProperty,
 	"RE_WARM_INTERVAL",
+	// v3.1.0 lazy-credentials env vars
+	envKopiaCredentialsPath, envKopiaConnectTimeout,
 }
+
+// v3.1.0 env-var names. Promoted to constants because the test file
+// references them in multiple table-row literals (goconst flagged
+// `KOPIA_CREDENTIALS_PATH` at 5 occurrences).
+const (
+	envKopiaCredentialsPath = "KOPIA_CREDENTIALS_PATH"
+	envKopiaConnectTimeout  = "KOPIA_CONNECT_TIMEOUT"
+)
 
 // snapshotEnv saves the current values of allEnvVars; restoreEnv puts them
 // back. Used as t.Cleanup so even a failing test doesn't leak env into the
@@ -419,37 +429,23 @@ func TestLoad_KopiaS3Backend(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "kopia-s3 missing access key",
-			envVars: map[string]string{
-				envBackendType:        backend.TypeKopiaS3,
-				envKopiaS3Endpoint:    testKopiaEndpoint,
-				envKopiaS3Bucket:      testKopiaBucket,
-				envAWSSecretAccessKey: testSecret,
-				envKopiaPassword:      testKopiaPassword,
-			},
-			wantErr: true,
-		},
-		{
-			name: "kopia-s3 missing secret key",
+			// v3.1.0: env-var creds are OPTIONAL when KOPIA_CREDENTIALS_PATH
+			// is set (default). The operator deployment shape mounts a
+			// Secret directory and reads creds from disk at call time. Env-
+			// var creds remain valid (legacy HTTP-only deployment shape) but
+			// are no longer required. This test row pins that an absent
+			// env-var trio is not an error in the default config — see
+			// TestLoad_KopiaS3Backend_PathlessRequiresEnvVarCreds for the
+			// inverse, where KOPIA_CREDENTIALS_PATH is explicitly empty.
+			name: "kopia-s3 missing all env-var creds (path-based default)",
 			envVars: map[string]string{
 				envBackendType:     backend.TypeKopiaS3,
 				envKopiaS3Endpoint: testKopiaEndpoint,
 				envKopiaS3Bucket:   testKopiaBucket,
-				envAWSAccessKeyID:  testAccess,
-				envKopiaPassword:   testKopiaPassword,
 			},
-			wantErr: true,
-		},
-		{
-			name: "kopia-s3 missing password",
-			envVars: map[string]string{
-				envBackendType:        backend.TypeKopiaS3,
-				envKopiaS3Endpoint:    testKopiaEndpoint,
-				envKopiaS3Bucket:      testKopiaBucket,
-				envAWSAccessKeyID:     testAccess,
-				envAWSSecretAccessKey: testSecret,
-			},
-			wantErr: true,
+			wantErr:      false,
+			wantEndpoint: testKopiaEndpoint,
+			wantBucket:   testKopiaBucket,
 		},
 		{
 			name: "kopia-s3 invalid disable-tls",
@@ -508,6 +504,170 @@ func TestLoad_KopiaS3Backend(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoad_KopiaS3Backend_DefaultsCredentialsPath pins the v3.1.0 default:
+// KOPIA_CREDENTIALS_PATH defaults to /var/secret/pvc-plumber-kopia (matches
+// the operator deployment.yaml volumeMount in the consuming GitOps repo) so
+// a fresh deployment with the new manifest shape gets path-based creds out
+// of the box. KOPIA_CONNECT_TIMEOUT defaults to 60s.
+func TestLoad_KopiaS3Backend_DefaultsCredentialsPath(t *testing.T) {
+	saved := snapshotEnv()
+	t.Cleanup(func() { restoreEnv(saved) })
+	clearAllEnv()
+
+	_ = os.Setenv(envBackendType, backend.TypeKopiaS3)
+	_ = os.Setenv(envKopiaS3Endpoint, testKopiaEndpoint)
+	_ = os.Setenv(envKopiaS3Bucket, testKopiaBucket)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.KopiaCredentialsPath != "/var/secret/pvc-plumber-kopia" {
+		t.Errorf("KopiaCredentialsPath = %q, want %q", cfg.KopiaCredentialsPath, "/var/secret/pvc-plumber-kopia")
+	}
+	if cfg.KopiaConnectTimeout != 60*time.Second {
+		t.Errorf("KopiaConnectTimeout = %v, want 60s", cfg.KopiaConnectTimeout)
+	}
+}
+
+// TestLoad_KopiaS3Backend_PathlessRequiresEnvVarCreds pins the inverse: when
+// KOPIA_CREDENTIALS_PATH is explicitly emptied (legacy HTTP-only deployment
+// shape), the three env-var creds become required again. This keeps v1.x
+// callers compiling and running unchanged.
+func TestLoad_KopiaS3Backend_PathlessRequiresEnvVarCreds(t *testing.T) {
+	saved := snapshotEnv()
+	t.Cleanup(func() { restoreEnv(saved) })
+
+	cases := []struct {
+		name       string
+		envVars    map[string]string
+		wantErrSub string
+	}{
+		{
+			name: "missing password",
+			envVars: map[string]string{
+				envBackendType:          backend.TypeKopiaS3,
+				envKopiaS3Endpoint:      testKopiaEndpoint,
+				envKopiaS3Bucket:        testKopiaBucket,
+				envAWSAccessKeyID:       testAccess,
+				envAWSSecretAccessKey:   testSecret,
+				envKopiaCredentialsPath: "",
+			},
+			wantErrSub: "KOPIA_PASSWORD",
+		},
+		{
+			name: "missing access key",
+			envVars: map[string]string{
+				envBackendType:          backend.TypeKopiaS3,
+				envKopiaS3Endpoint:      testKopiaEndpoint,
+				envKopiaS3Bucket:        testKopiaBucket,
+				envKopiaPassword:        testKopiaPassword,
+				envAWSSecretAccessKey:   testSecret,
+				envKopiaCredentialsPath: "",
+			},
+			wantErrSub: "AWS_ACCESS_KEY_ID",
+		},
+		{
+			name: "missing secret key",
+			envVars: map[string]string{
+				envBackendType:          backend.TypeKopiaS3,
+				envKopiaS3Endpoint:      testKopiaEndpoint,
+				envKopiaS3Bucket:        testKopiaBucket,
+				envKopiaPassword:        testKopiaPassword,
+				envAWSAccessKeyID:       testAccess,
+				envKopiaCredentialsPath: "",
+			},
+			wantErrSub: "AWS_SECRET_ACCESS_KEY",
+		},
+		{
+			name: "all three present (env-var legacy shape)",
+			envVars: map[string]string{
+				envBackendType:          backend.TypeKopiaS3,
+				envKopiaS3Endpoint:      testKopiaEndpoint,
+				envKopiaS3Bucket:        testKopiaBucket,
+				envKopiaPassword:        testKopiaPassword,
+				envAWSAccessKeyID:       testAccess,
+				envAWSSecretAccessKey:   testSecret,
+				envKopiaCredentialsPath: "",
+			},
+			wantErrSub: "", // happy path
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAllEnv()
+			for k, v := range tc.envVars {
+				_ = os.Setenv(k, v)
+			}
+			_, err := Load()
+			if tc.wantErrSub == "" {
+				if err != nil {
+					t.Errorf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErrSub)
+			}
+			if !contains(err.Error(), tc.wantErrSub) {
+				t.Errorf("error = %v, want substring %q", err, tc.wantErrSub)
+			}
+		})
+	}
+}
+
+// TestLoad_KopiaS3Backend_ConnectTimeoutOverride pins the env-var override
+// path for KOPIA_CONNECT_TIMEOUT.
+func TestLoad_KopiaS3Backend_ConnectTimeoutOverride(t *testing.T) {
+	saved := snapshotEnv()
+	t.Cleanup(func() { restoreEnv(saved) })
+
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+		want    time.Duration
+	}{
+		{"explicit 30s", "30s", false, 30 * time.Second},
+		{"explicit 2m", "2m", false, 2 * time.Minute},
+		{"unparseable rejected", "garbage", true, 0},
+		{"zero rejected", "0s", true, 0},
+		{"negative rejected", "-5s", true, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearAllEnv()
+			_ = os.Setenv(envBackendType, backend.TypeKopiaS3)
+			_ = os.Setenv(envKopiaS3Endpoint, testKopiaEndpoint)
+			_ = os.Setenv(envKopiaS3Bucket, testKopiaBucket)
+			_ = os.Setenv(envKopiaConnectTimeout, tc.raw)
+
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("expected error for %q, got nil", tc.raw)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if cfg.KopiaConnectTimeout != tc.want {
+				t.Errorf("KopiaConnectTimeout = %v, want %v", cfg.KopiaConnectTimeout, tc.want)
+			}
+		})
+	}
+}
+
+func contains(haystack, needle string) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // TestLoad_ExternalSecretsConfigDefaults pins the per-PVC ExternalSecret

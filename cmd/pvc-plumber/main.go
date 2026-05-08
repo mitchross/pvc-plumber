@@ -72,15 +72,24 @@ func main() {
 			"endpoint", cfg.KopiaS3Endpoint,
 			"bucket", cfg.KopiaS3Bucket,
 			"disable_tls", cfg.KopiaS3DisableTLS,
+			"credentials_path", cfg.KopiaCredentialsPath,
 		)
+		// Same credentials-source selection as the operator binary —
+		// directory-mounted Secret when available, env-var-loaded creds as
+		// the fallback. The legacy HTTP-only deployment shape typically
+		// keeps env-var creds, so the static source path runs in production
+		// for v1.x callers; v3.1.0+ deployments use the dir source.
+		var creds kopia.CredentialsSource
+		if cfg.KopiaCredentialsPath != "" {
+			creds = kopia.NewDirCredentialsSource(cfg.KopiaCredentialsPath)
+		} else {
+			creds = kopia.NewStaticCredentialsSource(cfg.KopiaPassword, cfg.KopiaS3AccessKey, cfg.KopiaS3SecretKey)
+		}
 		kopiaClient := kopia.NewClient(kopia.S3Config{
 			Endpoint:   cfg.KopiaS3Endpoint,
 			Bucket:     cfg.KopiaS3Bucket,
-			AccessKey:  cfg.KopiaS3AccessKey,
-			SecretKey:  cfg.KopiaS3SecretKey,
-			Password:   cfg.KopiaPassword,
 			DisableTLS: cfg.KopiaS3DisableTLS,
-		}, logger)
+		}, creds, logger, kopia.Options{ConnectTimeout: cfg.KopiaConnectTimeout})
 		if err := kopiaClient.Connect(context.Background()); err != nil {
 			logger.Error("failed to connect to kopia repository", "error", err)
 			os.Exit(1)

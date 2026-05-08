@@ -709,6 +709,174 @@ func TestEnsureExternalSecret_RecyclesLegacyFilesystemShape(t *testing.T) {
 	}
 }
 
+// promStackNS is the system namespace used in the long-name short-circuit
+// test. Constant so goconst doesn't flag the four occurrences inside
+// TestReconcile_SystemNamespace_ShortCircuits.
+const promStackNS = "prometheus-stack"
+
+// TestReconcile_SystemNamespace_ShortCircuits pins the v3.1.0 invariant:
+// a PVC in any system namespace must be skipped at the very top of
+// Reconcile, BEFORE any cleanup/Get/List call. This is the primary fix
+// for the 2026-05-08 prometheus-stack incident — the long-named monitoring
+// PVCs (>63 bytes) are in `prometheus-stack`, which IS in the operator's
+// SystemNamespaces set, but the pre-v3.1.0 reconciler reached cleanup()
+// before the system-namespace check and crashed building the label
+// selector. With the early short-circuit, we never even attempt to read
+// the PVC.
+func TestReconcile_SystemNamespace_ShortCircuits(t *testing.T) {
+	scheme := newTestScheme(t)
+	// Long-named PVC in a system namespace — the exact failure shape from
+	// 2026-05-08. 104 chars, well over the 63-byte label-value limit.
+	longName := "prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0-extra"
+	if len(longName) <= k8sLabelValueMaxLen {
+		t.Fatalf("test fixture mistake: long name length %d not > %d", len(longName), k8sLabelValueMaxLen)
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: promStackNS,
+			Name:      longName,
+			Labels:    map[string]string{backupLabelKey: backupHourly},
+		},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+
+	r := &PVCReconciler{
+		Client:           cli,
+		ExternalSecret:   testExternalSecretConfig(),
+		SystemNamespaces: map[string]struct{}{promStackNS: {}},
+	}
+
+	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: promStackNS, Name: longName}})
+	if err != nil {
+		t.Fatalf("reconcile must succeed for system-namespace PVC, got error: %v", err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("RequeueAfter = %v, want 0 (system-namespace short-circuit)", res.RequeueAfter)
+	}
+
+	// No children should have been created — the reconciler short-
+	// circuited before the ensure* path.
+	got := &unstructured.Unstructured{}
+	got.SetGroupVersionKind(esGVK)
+	err = cli.Get(context.Background(), types.NamespacedName{Namespace: promStackNS, Name: "volsync-" + longName}, got)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("ES must not be created in system namespace; got err=%v", err)
+	}
+}
+
+// TestLabelSafePVCRef_ShortNameUnchanged pins the no-op path: a PVC name
+// that fits the 63-byte limit returns verbatim, so steady-state callers
+// (the bulk of the cluster) see no behavior change.
+func TestLabelSafePVCRef_ShortNameUnchanged(t *testing.T) {
+	cases := []string{
+		"data",
+		"prometheus-data-0", // realistic short prom name
+		strings.Repeat("a", k8sLabelValueMaxLen),
+	}
+	for _, name := range cases {
+		if got := labelSafePVCRef(name); got != name {
+			t.Errorf("labelSafePVCRef(%q) = %q, want unchanged", name, got)
+		}
+	}
+}
+
+// TestLabelSafePVCRef_LongNameHashed pins the hash-truncate path: a PVC
+// name over 63 bytes maps to a deterministic 28-char `pvc-<hex>` value
+// that fits the label-value limit and survives selector validation.
+func TestLabelSafePVCRef_LongNameHashed(t *testing.T) {
+	long1 := strings.Repeat("a", k8sLabelValueMaxLen+1)
+	long2 := "prometheus-kube-prometheus-stack-prometheus-db-prometheus-kube-prometheus-stack-prometheus-0"
+
+	r1 := labelSafePVCRef(long1)
+	r2 := labelSafePVCRef(long2)
+
+	for _, r := range []string{r1, r2} {
+		if len(r) > k8sLabelValueMaxLen {
+			t.Errorf("hashed ref %q exceeds %d bytes (len=%d)", r, k8sLabelValueMaxLen, len(r))
+		}
+		if !strings.HasPrefix(r, "pvc-") {
+			t.Errorf("hashed ref %q must start with `pvc-` to mark it as hashed", r)
+		}
+		if len(r) != 28 {
+			t.Errorf("hashed ref %q has length %d, want exactly 28 (4 prefix + 24 hex)", r, len(r))
+		}
+	}
+
+	// Determinism: same input maps to the same output every time. cleanup()
+	// relies on this so the selector matches what newUnstructured emitted at
+	// create time.
+	if got := labelSafePVCRef(long1); got != r1 {
+		t.Errorf("labelSafePVCRef is non-deterministic: %q vs %q", got, r1)
+	}
+	// Distinctness: two different long names hash to different values
+	// (otherwise cleanup would reap the wrong children).
+	if r1 == r2 {
+		t.Errorf("labelSafePVCRef collided for distinct inputs: %q", r1)
+	}
+}
+
+// TestReconcile_LongPVCName_AppNamespace_UsesHashedLabel pins the
+// defense-in-depth path: a long-named PVC in an APP namespace (not in
+// SystemNamespaces) reconciles cleanly and the children carry the
+// hashed `volsync.backup/pvc=pvc-<hex>` label rather than the raw name.
+// Without labelSafePVCRef the unstructured.SetLabels call would emit a
+// 100+-char label that the apiserver would reject on the next List.
+func TestReconcile_LongPVCName_AppNamespace_UsesHashedLabel(t *testing.T) {
+	scheme := newTestScheme(t)
+	longName := strings.Repeat("a", 80)
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:         testNamespace,
+			Name:              longName,
+			Labels:            map[string]string{backupLabelKey: backupHourly},
+			CreationTimestamp: metav1.NewTime(time.Now().Add(-3 * time.Hour)),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("10Gi")},
+			},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pvc).Build()
+	r := newTestReconciler(cli)
+
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: longName}}); err != nil {
+		t.Fatalf("reconcile errored on long-name PVC: %v", err)
+	}
+
+	// Pull the rendered ES and check its labels.
+	es := &unstructured.Unstructured{}
+	es.SetGroupVersionKind(esGVK)
+	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "volsync-" + longName}, es); err != nil {
+		t.Fatalf("get ES for long-name pvc: %v", err)
+	}
+	got := es.GetLabels()[pvcLabel]
+	want := labelSafePVCRef(longName)
+	if got != want {
+		t.Errorf("ES pvcLabel = %q, want %q", got, want)
+	}
+	if len(got) > k8sLabelValueMaxLen {
+		t.Errorf("ES pvcLabel %q exceeds 63 bytes (len=%d)", got, len(got))
+	}
+
+	// And cleanup must find it via the same hashed selector. Trigger
+	// cleanup by removing the label and re-reconciling.
+	pvc.Labels = nil
+	if err := cli.Update(context.Background(), pvc); err != nil {
+		t.Fatalf("update pvc to remove backup label: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: longName}}); err != nil {
+		t.Fatalf("cleanup reconcile errored on long-name PVC: %v", err)
+	}
+	gotAfter := &unstructured.Unstructured{}
+	gotAfter.SetGroupVersionKind(esGVK)
+	if err := cli.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: "volsync-" + longName}, gotAfter); !apierrors.IsNotFound(err) {
+		t.Errorf("cleanup must reap children of long-name PVC; got err=%v", err)
+	}
+}
+
 // TestEnsureExternalSecret_NoRecycleOnSteadyState pins the inverse of the
 // migration test: a pre-existing v3-shaped ES must NOT be recycled (the
 // reconciler is Get-or-Create in steady state). This guards against an

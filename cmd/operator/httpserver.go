@@ -65,15 +65,25 @@ func buildBackend(ctx context.Context, cfg *config.Config, logger *slog.Logger) 
 			"endpoint", cfg.KopiaS3Endpoint,
 			"bucket", cfg.KopiaS3Bucket,
 			"disable_tls", cfg.KopiaS3DisableTLS,
+			"credentials_path", cfg.KopiaCredentialsPath,
+			"connect_timeout", cfg.KopiaConnectTimeout,
 		)
+		// v3.1.0: prefer the directory-mounted-Secret credentials source
+		// when KopiaCredentialsPath is set (operator deployment shape).
+		// Fall back to env-var creds via StaticCredentialsSource for the
+		// legacy HTTP-only deployment shape — see internal/kopia
+		// CredentialsSource for the why.
+		var creds kopia.CredentialsSource
+		if cfg.KopiaCredentialsPath != "" {
+			creds = kopia.NewDirCredentialsSource(cfg.KopiaCredentialsPath)
+		} else {
+			creds = kopia.NewStaticCredentialsSource(cfg.KopiaPassword, cfg.KopiaS3AccessKey, cfg.KopiaS3SecretKey)
+		}
 		kc := kopia.NewClient(kopia.S3Config{
 			Endpoint:   cfg.KopiaS3Endpoint,
 			Bucket:     cfg.KopiaS3Bucket,
-			AccessKey:  cfg.KopiaS3AccessKey,
-			SecretKey:  cfg.KopiaS3SecretKey,
-			Password:   cfg.KopiaPassword,
 			DisableTLS: cfg.KopiaS3DisableTLS,
-		}, logger)
+		}, creds, logger, kopia.Options{ConnectTimeout: cfg.KopiaConnectTimeout})
 		if err := kc.Connect(ctx); err != nil {
 			return nil, fmt.Errorf("connect to kopia repository: %w", err)
 		}

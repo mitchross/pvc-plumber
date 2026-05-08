@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -29,6 +30,19 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// k8sLabelValueMaxLen is the Kubernetes API server's hard limit on the
+// length of a label value (RFC 1123 / Kubernetes API conventions). Label
+// selectors that exceed this fail validation with
+// "must be no more than 63 characters".
+//
+// The reconciler uses a label selector keyed off `volsync.backup/pvc=<pvc>`
+// to find children for cleanup; PVC names longer than this would either
+// fail the selector outright or — depending on apiserver version — silently
+// drop the cleanup query. labelSafePVCRef() truncates+hashes any over-limit
+// PVC name into a deterministic 28-char value (`pvc-` + first 24 hex chars
+// of sha256) that still uniquely identifies the source PVC.
+const k8sLabelValueMaxLen = 63
 
 // Label keys applied to every child resource so cleanup can find them by
 // selector and so cluster operators can `kubectl get -l ...` to inspect what
@@ -192,19 +206,39 @@ type PVCReconciler struct {
 
 // Reconcile is the controller entrypoint. The flow:
 //
-//  1. PVC gone, deleting, unlabeled, or in a system namespace → cleanup any
+//  1. System-namespace check FIRST — before any cleanup() call. The
+//     reconciler refuses to touch PVCs in infrastructure namespaces (kube-
+//     system, longhorn-system, prometheus-stack, …) and, critically, must
+//     not even attempt to build a label selector for them. Long-named PVCs
+//     in monitoring (e.g. `prometheus-kube-prometheus-stack-prometheus-db-…`,
+//     104 chars) would otherwise trip the 63-byte label-value limit on the
+//     selector and crash-loop the reconciler. (See the v3.1.0 CHANGELOG for
+//     the 2026-05-08 incident this guard prevents.)
+//  2. PVC gone, deleting, unlabeled, or backup-exempt → cleanup any
 //     orphaned children and exit. cleanup is idempotent and tolerates the
 //     "no children to delete" case, so calling it on the happy-path early
 //     exits is cheap.
-//  2. Otherwise: ensure ExternalSecret + ReplicationDestination immediately
+//  3. Otherwise: ensure ExternalSecret + ReplicationDestination immediately
 //     (the RD must exist before the PVC binds so it can serve as a
 //     dataSourceRef target during restore).
-//  3. ReplicationSource is gated: only created once the PVC is Bound AND at
+//  4. ReplicationSource is gated: only created once the PVC is Bound AND at
 //     least 2h old. The age gate prevents backups from snapshotting an
 //     empty volume right after a fresh restore — the application needs time
 //     to land its data.
 func (r *PVCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx).WithValues("pvc", req.NamespacedName)
+
+	// Step 1: system-namespace short-circuit. Performed BEFORE the Get +
+	// cleanup() path so an over-long PVC name in an infra namespace can
+	// never reach the label-selector code. Defense-in-depth against a
+	// webhook namespaceSelector misconfiguration (the cluster manifest
+	// already excludes these namespaces, but if drift between
+	// SystemNamespaces and the webhook namespaceSelector ever occurs,
+	// THIS branch is what keeps the reconciler safe).
+	if _, inSystemNS := r.SystemNamespaces[req.Namespace]; inSystemNS {
+		logger.V(1).Info("skipping reconcile in system namespace")
+		return ctrl.Result{}, nil
+	}
 
 	var pvc corev1.PersistentVolumeClaim
 	if err := r.Get(ctx, req.NamespacedName, &pvc); err != nil {
@@ -221,14 +255,13 @@ func (r *PVCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	label := pvc.Labels[backupLabelKey]
 	isBackupLabeled := label == backupHourly || label == backupDaily
-	_, inSystemNS := r.SystemNamespaces[pvc.Namespace]
 	// `backup-exempt: "true"` is the explicit "this PVC is intentionally not
 	// backed up" opt-out. Treat it the same as label-removed: if a previously
 	// backup-labeled PVC has exempt added, reap any managed-by children so we
 	// don't keep a stale ES/RS/RD pinned to an exempt PVC.
 	isExempt := pvc.Labels[backupExemptLabel] == labelTrue
 
-	if !pvc.DeletionTimestamp.IsZero() || !isBackupLabeled || inSystemNS || isExempt {
+	if !pvc.DeletionTimestamp.IsZero() || !isBackupLabeled || isExempt {
 		if err := r.cleanup(ctx, pvc.Namespace, pvc.Name); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -498,19 +531,30 @@ func (r *PVCReconciler) ensureReplicationDestination(ctx context.Context, pvc *c
 	return r.Create(ctx, rd)
 }
 
-// cleanup deletes every child resource labeled `volsync.backup/pvc=<name>`
+// cleanup deletes every child resource labeled `volsync.backup/pvc=<ref>`
 // in the given namespace. It is the orphan reaper: when a PVC is removed
 // (or the backup label is dropped, or someone moves the PVC to a system
 // namespace), the children must follow. NotFound on individual deletes
 // and missing-CRD errors on List are both swallowed — see
 // ignoreNotFoundOrNoMatch.
+//
+// v3.1.0: the `volsync.backup/pvc=` label value is computed by
+// labelSafePVCRef so PVC names exceeding the 63-byte label-value limit
+// are mapped to a deterministic 28-char hashed identifier. Without this,
+// the reconciler crashed in error-loop on monitoring-stack PVCs whose
+// names approach 100 chars (prometheus / alertmanager statefulsets). The
+// system-namespace short-circuit at the top of Reconcile() means
+// monitoring-stack PVCs never reach this path in normal operation —
+// labelSafePVCRef is defense-in-depth for application-namespace PVCs
+// that legitimately have long names.
 func (r *PVCReconciler) cleanup(ctx context.Context, namespace, name string) error {
+	ref := labelSafePVCRef(name)
 	for _, gvk := range childGVKs {
 		list := &unstructured.UnstructuredList{}
 		list.SetGroupVersionKind(gvk)
 		if err := r.List(ctx, list,
 			client.InNamespace(namespace),
-			client.MatchingLabels{pvcLabel: name},
+			client.MatchingLabels{pvcLabel: ref},
 		); err != nil {
 			if e := ignoreNotFoundOrNoMatch(err); e != nil {
 				return e
@@ -529,6 +573,33 @@ func (r *PVCReconciler) cleanup(ctx context.Context, namespace, name string) err
 		}
 	}
 	return nil
+}
+
+// labelSafePVCRef returns a value safe to use as a Kubernetes label value
+// (max 63 bytes, RFC 1123 subset) that identifies the PVC. Names short
+// enough to fit are returned as-is; names longer than 63 bytes are mapped
+// to `pvc-<sha256-prefix>` (28 bytes total).
+//
+// Determinism is the contract: the same PVC name MUST always map to the
+// same ref so List by selector can find children created on a previous
+// reconcile. SHA-256 satisfies that, and a 24-char hex prefix (96 bits) is
+// far beyond the collision threshold for any realistic cluster size.
+//
+// Length budget for the hashed form:
+//
+//	"pvc-" (4) + 24 hex chars = 28 bytes — well under the 63-byte limit.
+//
+// The "pvc-" prefix marks the value as a hashed reference rather than a
+// raw name; cluster operators searching for a child by `kubectl get
+// externalsecret -l volsync.backup/pvc=<name>` against a long-named PVC
+// will fall back to grepping by the hash, which the operator's reconcile
+// log emits whenever it processes a long-named PVC.
+func labelSafePVCRef(pvcName string) string {
+	if len(pvcName) <= k8sLabelValueMaxLen {
+		return pvcName
+	}
+	sum := sha256.Sum256([]byte(pvcName))
+	return "pvc-" + hex.EncodeToString(sum[:12]) // 12 bytes = 24 hex chars
 }
 
 // ignoreNotFoundOrNoMatch swallows the two error classes that mean "the
@@ -578,6 +649,13 @@ func (r *PVCReconciler) exists(ctx context.Context, gvk schema.GroupVersionKind,
 
 // newUnstructured builds a child object with the standard managed-by /
 // pvc-pointer labels already applied. Spec gets filled in by the caller.
+//
+// v3.1.0: pvcLabel uses labelSafePVCRef(pvcName) so long PVC names produce
+// a label value that survives the 63-byte limit. Children created at v3.0.0
+// against short-named PVCs keep their raw name labels and remain findable;
+// only newly-created long-name children carry the hashed ref. cleanup()
+// hashes consistently so the selector matches whatever the reconciler
+// emitted at create time.
 func newUnstructured(gvk schema.GroupVersionKind, namespace, name, pvcName string) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
 	u.SetGroupVersionKind(gvk)
@@ -585,7 +663,7 @@ func newUnstructured(gvk schema.GroupVersionKind, namespace, name, pvcName strin
 	u.SetName(name)
 	u.SetLabels(map[string]string{
 		managedByLabel: managedByValue,
-		pvcLabel:       pvcName,
+		pvcLabel:       labelSafePVCRef(pvcName),
 	})
 	return u
 }

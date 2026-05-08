@@ -37,12 +37,41 @@ type Config struct {
 	// S3-compatible backend (e.g. RustFS, MinIO) the same way VolSync mover
 	// Jobs do, so there is no shared volume between the operator pod and
 	// mover pods. KopiaS3DisableTLS=true is the in-cluster RustFS shape.
+	//
+	// v3.1.0: KopiaPassword / KopiaS3AccessKey / KopiaS3SecretKey are now
+	// OPTIONAL. When KopiaCredentialsPath is set (the operator deployment
+	// shape since v3.1.0), credentials are loaded lazily from disk on each
+	// kopia subprocess invocation rather than from env vars at pod startup.
+	// The legacy cmd/pvc-plumber HTTP-only binary still populates these
+	// fields from secretKeyRef env vars and uses the static credentials
+	// source — both paths compile and run.
 	KopiaPassword     string
 	KopiaS3Endpoint   string
 	KopiaS3Bucket     string
 	KopiaS3AccessKey  string
 	KopiaS3SecretKey  string
 	KopiaS3DisableTLS bool
+
+	// KopiaCredentialsPath is the directory the operator reads kopia
+	// credentials from on each subprocess invocation. Defaults to
+	// `/var/secret/pvc-plumber-kopia` (matches the deployment.yaml
+	// volumeMount). Each Secret key (KOPIA_PASSWORD, AWS_ACCESS_KEY_ID,
+	// AWS_SECRET_ACCESS_KEY) becomes a separate file under this directory
+	// when kubelet renders the Secret as a volume.
+	//
+	// New in v3.1.0 — fixes the v3.0.0 ES-race pod-startup deadlock where
+	// secretKeyRef env-var resolution failed during ArgoCD sync waves
+	// because the pvc-plumber-kopia Secret was mid-update. Setting this
+	// path makes the operator read creds at call-time instead, so a Secret
+	// that hasn't rendered yet doesn't crash the pod.
+	KopiaCredentialsPath string
+
+	// KopiaConnectTimeout caps the total time `kopia.Client.Connect()`
+	// spends retrying on ErrCredentialsNotReady. Defaults to 60s.
+	// Configurable via the KOPIA_CONNECT_TIMEOUT env var. After this
+	// elapses, Connect returns an error and controller-runtime re-queues
+	// the calling reconcile.
+	KopiaConnectTimeout time.Duration
 
 	// ExternalSecret rendering knobs used by the PVC reconciler when it
 	// templates the per-PVC `volsync-<pvc>` ExternalSecret. Defaults pin to
@@ -173,12 +202,21 @@ func loadS3Config(cfg *Config) error {
 // loadKopiaS3Config loads the env vars the operator's own kopia client uses
 // to connect to the shared Kopia repository over S3. Mirrors the env-var
 // surface VolSync mover Jobs see (KOPIA_S3_ENDPOINT, KOPIA_S3_BUCKET,
-// KOPIA_S3_DISABLE_TLS, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
-// KOPIA_PASSWORD) so secret material can be reused 1:1 between the operator
-// pod and the per-PVC kopia-credentials Secrets the reconciler creates.
+// KOPIA_S3_DISABLE_TLS, plus optionally KOPIA_PASSWORD / AWS_ACCESS_KEY_ID /
+// AWS_SECRET_ACCESS_KEY) so secret material can be reused 1:1 between the
+// operator pod and the per-PVC kopia-credentials Secrets the reconciler
+// creates.
 //
 // KOPIA_S3_DISABLE_TLS defaults to false; in-cluster RustFS / plaintext-MinIO
 // deployments must set it to "true" explicitly.
+//
+// v3.1.0: the three credential env vars (KOPIA_PASSWORD, AWS_ACCESS_KEY_ID,
+// AWS_SECRET_ACCESS_KEY) are now OPTIONAL. The operator deployment mounts
+// those keys as a Secret directory (KopiaCredentialsPath) and reads them at
+// kopia subprocess call time, side-stepping the ArgoCD ES-race that crashed
+// pods on v3.0.0 startup. The legacy HTTP-only cmd/pvc-plumber binary keeps
+// passing them as env vars and uses StaticCredentialsSource — both paths
+// compile and run.
 func loadKopiaS3Config(cfg *Config) error {
 	cfg.KopiaS3Endpoint = os.Getenv("KOPIA_S3_ENDPOINT")
 	if cfg.KopiaS3Endpoint == "" {
@@ -190,15 +228,12 @@ func loadKopiaS3Config(cfg *Config) error {
 		return fmt.Errorf("KOPIA_S3_BUCKET is required for kopia-s3 backend")
 	}
 
+	// Credentials are optional in v3.1.0+. When KopiaCredentialsPath is set
+	// (operator deployment shape) they're loaded from disk; when it isn't
+	// (legacy HTTP-only deployment shape) they must come from env vars.
 	cfg.KopiaS3AccessKey = os.Getenv("AWS_ACCESS_KEY_ID")
-	if cfg.KopiaS3AccessKey == "" {
-		return fmt.Errorf("AWS_ACCESS_KEY_ID is required for kopia-s3 backend")
-	}
-
 	cfg.KopiaS3SecretKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
-	if cfg.KopiaS3SecretKey == "" {
-		return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for kopia-s3 backend")
-	}
+	cfg.KopiaPassword = os.Getenv("KOPIA_PASSWORD")
 
 	cfg.KopiaS3DisableTLS = false
 	if disableStr := os.Getenv("KOPIA_S3_DISABLE_TLS"); disableStr != "" {
@@ -209,9 +244,49 @@ func loadKopiaS3Config(cfg *Config) error {
 		cfg.KopiaS3DisableTLS = v
 	}
 
-	cfg.KopiaPassword = os.Getenv("KOPIA_PASSWORD")
-	if cfg.KopiaPassword == "" {
-		return fmt.Errorf("KOPIA_PASSWORD is required for kopia-s3 backend")
+	// KOPIA_CREDENTIALS_PATH semantics:
+	//   - unset (LookupEnv returns false) → use the operator default
+	//     `/var/secret/pvc-plumber-kopia` so a fresh v3.1.0 deployment
+	//     gets path-based creds out of the box.
+	//   - set to a non-empty value → use it verbatim.
+	//   - set to the empty string explicitly → disable the path-based
+	//     loader and require env-var creds (legacy HTTP-only deployment
+	//     shape). This is the escape hatch for v1.x callers that haven't
+	//     adopted the Secret-mount pattern.
+	if v, ok := os.LookupEnv("KOPIA_CREDENTIALS_PATH"); ok {
+		cfg.KopiaCredentialsPath = v
+	} else {
+		cfg.KopiaCredentialsPath = "/var/secret/pvc-plumber-kopia"
+	}
+
+	cfg.KopiaConnectTimeout = 60 * time.Second
+	if v := os.Getenv("KOPIA_CONNECT_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return fmt.Errorf("invalid KOPIA_CONNECT_TIMEOUT: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("KOPIA_CONNECT_TIMEOUT must be > 0, got %s", v)
+		}
+		cfg.KopiaConnectTimeout = d
+	}
+
+	// Either path-based creds OR env-var creds must be available. The
+	// path-based default above is set unconditionally; we only trip an
+	// error if KOPIA_CREDENTIALS_PATH was explicitly set to empty AND the
+	// env-var trio is also incomplete. This keeps the v3.0.0 → v3.1.0
+	// upgrade smooth (legacy env vars still loaded if present) while
+	// allowing pure-Secret-mount deployments.
+	if cfg.KopiaCredentialsPath == "" {
+		if cfg.KopiaPassword == "" {
+			return fmt.Errorf("KOPIA_PASSWORD is required for kopia-s3 backend when KOPIA_CREDENTIALS_PATH is empty")
+		}
+		if cfg.KopiaS3AccessKey == "" {
+			return fmt.Errorf("AWS_ACCESS_KEY_ID is required for kopia-s3 backend when KOPIA_CREDENTIALS_PATH is empty")
+		}
+		if cfg.KopiaS3SecretKey == "" {
+			return fmt.Errorf("AWS_SECRET_ACCESS_KEY is required for kopia-s3 backend when KOPIA_CREDENTIALS_PATH is empty")
+		}
 	}
 
 	return nil
