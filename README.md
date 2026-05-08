@@ -3,81 +3,208 @@
 [![Build and Test](https://github.com/mitchross/pvc-plumber/actions/workflows/build.yaml/badge.svg)](https://github.com/mitchross/pvc-plumber/actions/workflows/build.yaml)
 [![Release](https://github.com/mitchross/pvc-plumber/actions/workflows/release.yaml/badge.svg)](https://github.com/mitchross/pvc-plumber/actions/workflows/release.yaml)
 
-> 🚨 **`v2.0.0` is a major breaking release.** pvc-plumber is now a Kubernetes
-> operator (controller-runtime + admission webhooks) in addition to the
-> existing HTTP service. The HTTP `/exists` wire format is unchanged and the
-> operator surface can be disabled with `OPERATOR_MODE=false` for a drop-in
-> v1 replacement, but the deployment surface (RBAC, cert-manager, ESO,
-> webhook configurations, leader election) is substantially different.
-> Read [`CHANGELOG.md`](CHANGELOG.md) and
-> [`MIGRATION-v1-to-v2.md`](MIGRATION-v1-to-v2.md) before bumping from any
-> `1.x` tag.
+**One label. Full backup lifecycle. Automatic restore on re-create.**
 
-Lightweight K8s service that checks whether PVC backups exist in S3 or NFS-backed Kopia repositories. From `v2.0.0` onward it also acts as the Kubernetes operator that owns the VolSync `ExternalSecret` / `ReplicationSource` / `ReplicationDestination` lifecycle and gates PVC creation through admission webhooks. Enables zero-touch disaster recovery with VolSync.
+pvc-plumber is a Kubernetes operator that takes care of the entire PVC backup story in a homelab cluster. You stick `backup: hourly` (or `daily`) on a PersistentVolumeClaim, and the operator does *everything else* — creates the per-PVC kopia password, schedules the backups, sets up the restore target, and (the killer feature) **if you delete and recreate that PVC later, the new one comes up populated from the last backup automatically.** No manual restore command. No copy-paste from a runbook.
 
-## Overview
+Two diagrams below — *the day-1 setup* and *the day-2 magic*.
 
-**pvc-plumber** is a microservice designed to run in Kubernetes clusters to determine if a Persistent Volume Claim (PVC) has a backup in S3 or an NFS-mounted Kopia repository, should restore from backup, or should start fresh. It's intended to be called by Kyverno policies during PVC creation.
-
-### Supported Backends
-
-| Backend | Description | Use Case |
-|---------|-------------|----------|
-| `s3` | S3/MinIO object storage | VolSync Restic backups to S3 |
-| `kopia-fs` | NFS-backed Kopia filesystem repository | VolSync Kopia backups on NFS |
-
-### How It Works
+**Day 1: you label a PVC. Three companion resources land.**
 
 ```mermaid
 graph LR
-    A[Kyverno Policy] -->|GET /exists/ns/pvc| B[pvc-plumber]
-    B -->|S3 Backend| C[S3/MinIO]
-    B -->|Kopia Backend| D[NFS Repository]
-    C -->|List Objects| B
-    D -->|kopia snapshot list| B
-    B -->|JSON Response| A
-    A -->|Decide| E[Create PVC]
-    E -->|Restore or Fresh| F[VolSync]
+    USER[👤 PVC with<br/>backup: hourly]
+    OP[🛠️ pvc-plumber]
+    SECRET[🔑 ExternalSecret]
+    SCHED[⏰ ReplicationSource]
+    REST[♻️ ReplicationDestination]
+
+    USER --> OP
+    OP --> SECRET
+    OP --> SCHED
+    OP --> REST
+
+    style OP fill:#5bc0de,stroke:#222,stroke-width:3px,color:#fff
+    style USER fill:#fde68a,stroke:#7a4d00
 ```
 
-When a PVC is created:
-1. Kyverno intercepts the creation
-2. Calls pvc-plumber to check if backup exists
-3. pvc-plumber queries the configured backend:
-   - **S3**: Lists objects at `{namespace}/{pvc-name}/`
-   - **Kopia**: Lists snapshots for source `{pvc-name}-backup@{namespace}`
-4. Returns a tri-state decision: `restore`, `fresh`, or `unknown`
-5. Kyverno restores, creates fresh, or denies PVC creation when backup truth is unknown
+*One label in, three resources out. The ExternalSecret holds the per-PVC kopia password; the ReplicationSource is the backup schedule; the ReplicationDestination is the restore target (yes, created up-front — see day 2).*
 
-### Key Features
+**Day 2: you delete and re-apply the same PVC. New PV comes up populated.**
 
-- **Multiple backends**: S3/MinIO and NFS-backed Kopia filesystem support
-- **Tri-state restore decisions**: `restore` when a backup exists, `fresh` when an authoritative check found none, and `unknown` for backend/query errors
-- **Cache with pre-warm**: On startup, scans all kopia snapshots in one call and caches authoritative results. Cache misses fall back to a per-PVC backend query
-- **Fail-closed safety contract**: `/exists` returns HTTP 503 for unknown backup truth so admission policy can deny PVC creation instead of letting apps initialize empty state
-- **Lightweight**: Alpine-based image with kopia included
-- **Backwards compatible**: Defaults to S3 backend
-- **Graceful shutdown**: Handles SIGTERM/SIGINT properly
-- **Structured logging**: JSON logs with configurable levels
-- **Health checks**: `/healthz` and `/readyz` endpoints for Kubernetes probes
-- **Prometheus metrics**: `/metrics` endpoint for monitoring
+```mermaid
+graph LR
+    REBUILD[👤 PVC re-applied]
+    OP[🛠️ pvc-plumber]
+    KOPIA[(💾 Kopia repo<br/>on NFS)]
+    POP[✨ Populated PV]
 
-## Quick Start
+    REBUILD --> OP
+    OP -. "checks for backup" .-> KOPIA
+    KOPIA -. "snapshot found" .-> OP
+    OP --> POP
 
-### Operating mode (`v2.0.0`+)
+    style OP fill:#5bc0de,stroke:#222,stroke-width:3px,color:#fff
+    style POP fill:#22c55e,stroke:#0b3d1b,stroke-width:2px,color:#fff
+    style REBUILD fill:#fde68a,stroke:#7a4d00
+```
 
-The `2.0.0` image runs in two modes, selected by the `OPERATOR_MODE` env
-var. Both modes share the same backend and the same in-process Kopia
-connection.
+*The killer feature in four nodes. The admission webhook checks Kopia for an existing backup; if there's one, it injects `dataSourceRef` and Longhorn populates the new PV from the snapshot before binding. Apps come back up with their data.*
 
-| `OPERATOR_MODE` | Behaviour | When to use |
+> **`v2.0.0` is a major breaking release.** Before v2, pvc-plumber was a small HTTP service that Kyverno called from generate/mutate policies. From v2 onward it's a full operator (controller + admission webhooks). If you're upgrading from any 1.x tag, read [`CHANGELOG.md`](CHANGELOG.md) and [`MIGRATION-v1-to-v2.md`](MIGRATION-v1-to-v2.md) first — the deployment surface changed substantially.
+>
+> The legacy HTTP `/exists` API is preserved unchanged; setting `OPERATOR_MODE=false` runs the v2 image as a drop-in v1 replacement during a staged rollout.
+
+---
+
+## Why this exists
+
+Three pain points in the v1 (Kyverno-based) setup pushed us to rewrite:
+
+1. **Kyverno is a general-purpose policy engine and the PVC-restore use case has sharp edges.** Getting `background`, `synchronize`, `mutateExistingOnPolicyUpdate` set wrong has caused cluster incidents. The settings are subtle and the failure modes are silent.
+2. **Webhook deadlock risk is real.** On 2026-04-08, Kyverno crashed mid-PVC-create with `failurePolicy: Fail` set on a generate policy. The cluster wedged — controllers couldn't create their own PVCs to come back up. That was a Tuesday morning we don't want to repeat. The v2 operator's namespaceSelector exclusion list was designed in response.
+3. **Orphan cleanup was a bash CronJob.** Kyverno's `ClusterCleanupPolicy` was supposed to handle reaping leftover ExternalSecret/ReplicationSource/ReplicationDestination resources, but it's silently broken on Kyverno 1.17.x and 1.18.x (confirmed during a drill on 2026-04-30). Running `kubectl get` + `kubectl delete` in a loop from a CronJob is a code smell. The v2 reconciler does it itself.
+
+The v2 operator folds all that into one binary: `controller-runtime` reconciler + three admission webhooks + the same Kopia client we already had. Same backups, fewer moving parts.
+
+---
+
+## How it works (high level)
+
+Here's how that operator is wired internally — it's one Go binary with four cooperating subsystems.
+
+```mermaid
+graph TB
+    subgraph POD["🐳 pvc-plumber pod"]
+        HTTP["📡 HTTP server<br/>(/exists, probes)"]
+        WH["🛡️ Webhook server<br/>(3 handlers)"]
+        REC["🔁 PVC reconciler"]
+        KC["💾 Kopia client<br/>+ cache"]
+    end
+    NFS[("🗄️ NFS Kopia repo")]
+    APIS["☸️ kube-apiserver"]
+
+    HTTP --> KC
+    WH --> KC
+    KC -- "list snapshots" --> NFS
+    REC <-- "watch + write" --> APIS
+    WH <-- "admission" --> APIS
+
+    style POD fill:#e3eaff,stroke:#1d5fa7,stroke-width:2px
+    style KC fill:#5bc0de,stroke:#222,stroke-width:2px,color:#fff
+```
+
+*Four subsystems in one process, sharing one Kopia connection and one cache. The HTTP server and the webhook server both ask the same Kopia client; they get consistent answers at the same moment because they're literally the same instance.*
+
+The PVC reconciler watches every PersistentVolumeClaim in the cluster. When it sees one with `backup: hourly` (or `daily`), it makes sure the companion resources exist:
+
+| Resource | What it does | When it's created |
 |---|---|---|
-| `true` | HTTP `/exists` server **plus** controller-runtime manager + 3 admission webhooks + PVC reconciler | Production v2 deployment. Requires cert-manager, ESO, RBAC, webhook configurations — see [`MIGRATION-v1-to-v2.md`](MIGRATION-v1-to-v2.md). |
-| `false` (or unset) | HTTP `/exists` server only; manager and webhooks disabled | Drop-in v1 replacement. Useful as a staging step during a v1→v2 cutover, or for non-Kubernetes hosts that just want the existence oracle. |
+| `ExternalSecret` | Renders a per-PVC kopia password Secret via your existing ClusterSecretStore | Immediately, on first reconcile |
+| `ReplicationDestination` | The restore target. Future PVCs with the same name use this as their `dataSourceRef` | Immediately (must exist before the PVC binds) |
+| `ReplicationSource` | The backup schedule. Cron minute is `sha256(ns/pvc) % 60` so PVCs don't all fire at once | After the PVC is **Bound** *and* at least 2 hours old |
 
-The CLI examples below demonstrate the HTTP-only surface
-(`OPERATOR_MODE=false`) — running the full operator outside of
-Kubernetes isn't supported.
+The 2-hour wait is deliberate — it stops us from backing up a half-restored volume mid-restore. There's a [whole section on it in the reconciler doc](docs/reconciler.md#the-2h-bound-and-aged-grace-period) if you want the war story.
+
+When the PVC gets deleted (or unlabeled, or moved into a system namespace, or labeled `backup-exempt: "true"`), the reconciler reaps the three companion resources by label. No orphan-reaper CronJob needed.
+
+The three admission webhooks each have a different job:
+
+- **`/mutate-v1-pvc`** — when a backup-labeled PVC is created and Kopia already has snapshots for that namespace+name, inject `dataSourceRef` so Longhorn populates the new PV from the snapshot. **This is the killer feature.**
+- **`/validate-v1-pvc`** — fail-closed safety net. If Kopia can't tell us whether a backup exists (network blip, NFS unreachable, etc.), deny the PVC create rather than risk admitting an empty volume over restorable data.
+- **`/mutate-batch-v1-job`** — VolSync mover Jobs need `/repository` mounted from NFS to reach the Kopia repo. We inject the volume + per-container mount transparently. Replaces what used to be a Kyverno NFS-inject policy.
+
+For the full architectural deep dive, including sequence diagrams of the create + restore paths, see **[`docs/architecture.md`](docs/architecture.md)**.
+
+---
+
+## Quick start
+
+The simplest possible thing: a backup-labeled PVC.
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: paperless
+  labels:
+    backup: hourly        # ← that's it. that's the contract.
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 10Gi } }
+  storageClassName: longhorn
+```
+
+*That label is the only thing you need to know as a user. Everything else — secret, schedule, restore target, cleanup — is the operator's job.*
+
+Once the operator is installed in your cluster, applying this PVC will:
+
+1. Pass through the admission webhooks (which check Kopia and either inject `dataSourceRef` for restore, or admit unchanged for a fresh PVC).
+2. Trigger the reconciler to create `volsync-data` (ExternalSecret) and `data-backup` (ReplicationDestination) in the `paperless` namespace.
+3. After the PVC binds and is 2 hours old, the reconciler creates `data-backup` (ReplicationSource) — the actual backup schedule starts ticking.
+
+Two opt-out escape hatches if you need them, both with required audit-trail annotations:
+
+```yaml
+# I know there's a backup, but I want a fresh PVC anyway:
+metadata:
+  labels: { backup: hourly }
+  annotations:
+    volsync.backup/skip-restore: "true"
+    volsync.backup/skip-restore-reason: "test-data, will repopulate via fixture"
+
+# Don't ever back this PVC up:
+metadata:
+  labels:
+    backup-exempt: "true"
+  annotations:
+    storage.vanillax.dev/backup-exempt-reason: "cache"   # one of: cache, scratch, external-source, media-on-nas, database-native, test
+```
+
+*Both opt-outs are denied by the validating webhook unless their reason annotation is present and non-empty. Silent opt-out is the actual foot-gun the audit trail exists to prevent.*
+
+For the operator-side install (RBAC, cert-manager Certificate, webhook configurations, Deployment), see [`MIGRATION-v1-to-v2.md`](MIGRATION-v1-to-v2.md) — the prerequisites are the install instructions.
+
+---
+
+## Documentation
+
+The deeper docs are for when you want to understand *how* it works (or you're prepping a YouTube-style demo):
+
+| Doc | What it covers | When to read |
+|---|---|---|
+| **[`docs/architecture.md`](docs/architecture.md)** | The whole operator — four-part binary, PVC create + restore sequence diagrams, all three webhooks, the reconciler loop, the cleanup reaper, key design decisions, anti-features | Start here if you want the big picture |
+| **[`docs/admission-webhooks.md`](docs/admission-webhooks.md)** | Webhook protocol primer, `Handle()` walkthrough for each of the three handlers, fail-closed/fail-open invariants, TLS lifecycle, namespaceSelector deadlock prevention | When you want to understand the admission side |
+| **[`docs/reconciler.md`](docs/reconciler.md)** | controller-runtime primer, reconcile decision tree, Get-or-Create rationale, the SHA256 schedule formula, the 2h grace period, the cleanup reaper | When you want to understand the controller side |
+| **[`docs/restore-decision-flow.md`](docs/restore-decision-flow.md)** | The underlying restore/fresh/unknown tri-state contract — same in v1 and v2 | If you're integrating with the legacy `/exists` HTTP endpoint |
+| **[`MIGRATION-v1-to-v2.md`](MIGRATION-v1-to-v2.md)** | Step-by-step v1.x → 2.x migration with three rollout paths, rollback steps, and the verification checklist | When you're upgrading an existing v1 cluster |
+| **[`CHANGELOG.md`](CHANGELOG.md)** | Version-by-version change list, with v2.1's SHA256 schedule and `backup-exempt` label additions tracked under `[Unreleased]` | When you're picking a version to bump to |
+
+---
+
+## Key features
+
+- **Operator + HTTP service in one binary.** `OPERATOR_MODE=true` runs the full operator (manager + 3 webhooks + reconciler + HTTP). `OPERATOR_MODE=false` runs HTTP-only as a drop-in v1 replacement.
+- **Kopia and S3 backends.** Kopia (filesystem on NFS) is what the v2 operator uses; S3 is preserved for the legacy v1 HTTP path.
+- **Tri-state restore decisions.** `restore` when a backup exists, `fresh` when authoritatively no backup, `unknown` when we genuinely can't tell. The webhook denies on `unknown` — false admits over restorable data are the worst outcome.
+- **In-memory cache with pre-warm.** On startup, one `kopia snapshot list --all` populates the cache. Admission requests hit the cache; the periodic re-warm replaces the cache contents so deleted backups stop returning stale `exists=true`.
+- **Leader election.** Recommended deployment is `replicas: 2` with a `coordination.k8s.io/leases` lock. The non-leader still serves admission webhooks (admission is stateless).
+- **Health checks.** `/healthz` and `/readyz` for liveness and readiness. The readiness probe also confirms the Kopia repository path is still reachable.
+- **Prometheus metrics.** `/metrics` exposes per-decision counters (`pvc_plumber_backup_check_total{decision="restore"}` etc.) and request error counts.
+
+---
+
+## Running the binary directly (HTTP-only mode)
+
+For local testing, smoke-checking a backend, or running pvc-plumber outside Kubernetes (e.g., as a v1-style HTTP service that another cluster's policies call), you can run the binary in HTTP-only mode with `OPERATOR_MODE=false` (or just unset). The full operator surface (manager + webhooks + reconciler) requires Kubernetes; HTTP-only doesn't.
+
+### Operating mode summary
+
+| `OPERATOR_MODE` | What runs | When to use |
+|---|---|---|
+| `true` | HTTP `/exists` server **plus** controller-runtime manager + 3 admission webhooks + PVC reconciler | Production v2 deployment in-cluster. Requires cert-manager, External Secrets Operator, RBAC, and webhook configurations — see [`MIGRATION-v1-to-v2.md`](MIGRATION-v1-to-v2.md). |
+| `false` (or unset) | HTTP `/exists` server only — no manager, no webhooks | Drop-in v1 replacement during cutover; local smoke tests; non-Kubernetes hosts. |
 
 ### S3 Backend (Default)
 

@@ -15,8 +15,12 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build static binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o pvc-plumber ./cmd/pvc-plumber
+# Build static binary — ./cmd/operator is the v2 entrypoint that wires the
+# controller-runtime manager + admission webhooks. It still hosts the legacy
+# /exists HTTP server when OPERATOR_MODE=false, so this single binary covers
+# both deployment shapes. Building ./cmd/pvc-plumber here was the v2.1.0
+# regression that left the cluster's webhook server dead.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o pvc-plumber ./cmd/operator
 
 # Final stage - use alpine for kopia compatibility
 FROM alpine:3.21
@@ -37,6 +41,10 @@ RUN addgroup -g 568 plumber && \
 
 USER plumber:plumber
 
+# 8080: legacy /exists HTTP API + Prometheus /metrics + /healthz/readyz.
+# 9443: TLS admission webhook server (controller-runtime), used when
+#       OPERATOR_MODE=true.
 EXPOSE 8080
+EXPOSE 9443
 
 ENTRYPOINT ["/pvc-plumber"]

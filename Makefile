@@ -11,7 +11,7 @@ help: ## Show this help
 
 build: ## Build binary locally
 	@echo "Building $(BINARY_NAME)..."
-	CGO_ENABLED=0 go build -a -installsuffix cgo $(LDFLAGS) -o $(BINARY_NAME) ./cmd/pvc-plumber
+	CGO_ENABLED=0 go build -a -installsuffix cgo $(LDFLAGS) -o $(BINARY_NAME) ./cmd/operator
 	@echo "Built $(BINARY_NAME)"
 
 test: ## Run tests with coverage

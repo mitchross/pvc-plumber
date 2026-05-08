@@ -15,8 +15,9 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build static binary
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o pvc-plumber ./cmd/pvc-plumber
+# Build static binary — ./cmd/operator is the v2 entrypoint (manager +
+# webhooks). See Dockerfile for the full rationale.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o pvc-plumber ./cmd/operator
 
 # Final stage - with shell for debugging
 FROM alpine:3.21
@@ -38,5 +39,6 @@ RUN addgroup -g 568 plumber && \
 USER plumber:plumber
 
 EXPOSE 8080
+EXPOSE 9443
 
 ENTRYPOINT ["/pvc-plumber"]

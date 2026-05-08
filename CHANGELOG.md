@@ -15,7 +15,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Tracked in the `v2.1-cheap-wins` branch (PR #4). Targets `2.1.0`.
+## [2.1.1] — 2026-05-07
+
+### Fixed
+
+- **Container image now actually contains the v2 operator binary.** `v2.1.0`
+  shipped with `Dockerfile` line 19 still pointing at `./cmd/pvc-plumber`
+  (the v1 legacy HTTP-only entrypoint) instead of `./cmd/operator` (the
+  controller-runtime entrypoint that runs the manager + webhook server).
+  Effect on consuming clusters: the deployment looked healthy — the kopia
+  cache pre-warm loop served `/exists` on `:8080` and the pod stayed
+  `1/1 Ready` — but nothing listened on `:9443`, so the registered
+  admission webhooks (`failurePolicy: Fail`) denied every new
+  backup-labeled PVC creation with `connection refused`, and the
+  reconciler never ran (zero `ExternalSecret` objects were created).
+  Existing `ReplicationSource` / `ReplicationDestination` resources kept
+  operating on autopilot via VolSync's own controllers, masking the
+  regression in routine ops. Same path fix applied to `Dockerfile.debug`,
+  `Makefile`, and `.github/workflows/build.yaml`. Added `EXPOSE 9443` to
+  both Dockerfiles for documentation. Added inline build comment naming
+  the `cmd/operator` choice as canonical.
+- **Detection guidance.** `kubectl exec deploy/pvc-plumber -- netstat -tlnp`
+  on a correctly-built operator pod shows BOTH `:8080` (HTTP API +
+  Prometheus metrics + `/healthz`/`/readyz`) AND `:9443` (TLS webhook
+  server) when `OPERATOR_MODE=true`. A v2.1.0 pod will only show `:8080`.
+  `strings /pvc-plumber | grep controller-runtime` is non-empty on a
+  correctly-built binary; on the v2.1.0 binary it returns nothing.
+
+## [2.1.0] — 2026-05-07
+
+Tracked in the `v2.1-cheap-wins` branch (PR #4).
+
+> ⚠️ The published `:2.1.0` container image is broken — it ships the v1
+> legacy binary instead of the operator binary. Use `:2.1.1` (or later)
+> for any cluster that has the v2 webhook configurations registered.
+> Details: see the `[2.1.1]` Fixed entry above.
 
 ### Changed
 
