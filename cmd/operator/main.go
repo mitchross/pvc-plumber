@@ -116,10 +116,19 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
+	// Phase 2.5d: resolve runtime mode (PVC_PLUMBER_MODE → audit default)
+	// BEFORE config.Load() so that audit-mode startup can skip backend
+	// validation. The audit-mode binary must NOT depend on RustFS / Kopia
+	// / S3 / credential env vars to come up — config.LoadWithOptions
+	// (SkipBackend=true) is the seam.
+	runtimeCfg, runtimeErr := runtimeconfig.Load()
+
 	// slog drives the legacy HTTP server (cmd/pvc-plumber/main.go uses it);
 	// reuse the same JSON format and level resolution so logs look identical
 	// whether the operator binary or the legacy binary is running.
-	cfg, err := config.Load()
+	cfg, err := config.LoadWithOptions(config.LoadOptions{
+		SkipBackend: !runtimeCfg.WritesAllowed(),
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
 		os.Exit(1)
@@ -133,12 +142,10 @@ func main() {
 	sysNs := parseSystemNamespaces(os.Getenv("SYSTEM_NAMESPACES"))
 	operatorMode := os.Getenv("OPERATOR_MODE") == "true"
 
-	// Phase 2.5: resolve runtime mode (PVC_PLUMBER_MODE → audit default).
-	// The Banner() is the first thing logged so operators see at a glance
-	// whether the binary is in a write-capable mode. The Mode is then
-	// threaded through to runManager so the AuditingClient wrapper can be
-	// constructed when the manager runs.
-	runtimeCfg, runtimeErr := runtimeconfig.Load()
+	// Now that the slogger is up, surface any runtimeconfig warning + the
+	// banner. The Banner() goes first so it's the LITERAL first audit
+	// signal — log scrapers expect to see it before any other line in
+	// audit-mode pods.
 	if runtimeErr != nil {
 		slogger.Warn("runtime config load returned a warning",
 			"error", runtimeErr,
@@ -169,18 +176,25 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Backend + cache: shared between HTTP server and webhook handlers so
-	// there's exactly one Kopia connection and one cache. This is the
-	// "shared kopia client" the conductor's brief asked for; the cached
-	// wrapper satisfies the webhook package's narrow `kopiaClient`
-	// interface (CheckBackupExists only).
-	bundle, err := buildBackend(rootCtx, cfg, slogger)
-	if err != nil {
-		slogger.Error("backend init failed", "error", err)
-		os.Exit(1)
+	// Backend + cache + HTTP server are conditional. In audit mode the
+	// binary must NOT initialize Kopia / S3 / kopia-credentials, must NOT
+	// connect to RustFS, and must NOT serve the legacy /exists endpoint —
+	// the audit-mode promise is "binary starts cleanly even when the
+	// backup infrastructure is unreachable." Phase 2.5d of the v4 PRD.
+	//
+	// Anything that depends on `bundle` (HTTP server, cache re-warm loop,
+	// webhook handlers in runManager) is gated on the same condition.
+	var bundle *backendBundle
+	if runtimeCfg.WritesAllowed() {
+		bundle, err = buildBackend(rootCtx, cfg, slogger)
+		if err != nil {
+			slogger.Error("backend init failed", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		slogger.Info("audit mode: skipping backend init (Kopia / S3 / credentials)",
+			"mode", runtimeCfg.Mode.String())
 	}
-
-	httpSrv := newHTTPServer(cfg, bundle, slogger)
 
 	// errgroup collects errors from any subsystem. ctx derives from
 	// rootCtx; if any goroutine returns non-nil, ctx cancels and the rest
@@ -188,41 +202,49 @@ func main() {
 	// the shutdown goroutine pattern below.
 	g, gctx := errgroup.WithContext(rootCtx)
 
-	// 1. HTTP server (always on — even when OPERATOR_MODE=false this
-	//    binary keeps serving the legacy /exists/ surface, which is how
-	//    the cluster does the rolling cutover).
-	g.Go(func() error {
-		slogger.Info("http server starting", "addr", httpSrv.Addr)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("http server: %w", err)
-		}
-		return nil
-	})
-	g.Go(func() error {
-		<-gctx.Done()
-		slogger.Info("http server shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
-			return fmt.Errorf("http shutdown: %w", err)
-		}
-		return nil
-	})
-
-	// 2. Cache re-warm loop (kopia-s3 only). Identical cadence to the
-	//    legacy binary; ctx cancellation stops it within one tick.
-	if bundle.kopia != nil && cfg.ReWarmInterval > 0 {
+	// 1. Legacy HTTP server (/exists, /metrics) — only when a backend is
+	//    initialized. In audit mode this is intentionally OFF; the
+	//    controller-runtime manager still serves its own /metrics and
+	//    healthz on :8081 / :8082 so observability isn't lost.
+	if bundle != nil {
+		httpSrv := newHTTPServer(cfg, bundle, slogger)
 		g.Go(func() error {
-			runCacheReWarmLoop(gctx, bundle.kopia, bundle.cached, cfg.ReWarmInterval, slogger)
+			slogger.Info("http server starting", "addr", httpSrv.Addr)
+			if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("http server: %w", err)
+			}
 			return nil
 		})
+		g.Go(func() error {
+			<-gctx.Done()
+			slogger.Info("http server shutting down")
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("http shutdown: %w", err)
+			}
+			return nil
+		})
+
+		// 2. Cache re-warm loop (kopia-s3 only). Identical cadence to the
+		//    legacy binary; ctx cancellation stops it within one tick.
+		if bundle.kopia != nil && cfg.ReWarmInterval > 0 {
+			g.Go(func() error {
+				runCacheReWarmLoop(gctx, bundle.kopia, bundle.cached, cfg.ReWarmInterval, slogger)
+				return nil
+			})
+		}
+	} else {
+		slogger.Info("audit mode: HTTP server + cache re-warm loop NOT started")
 	}
 
 	// 3. controller-runtime manager — only when OPERATOR_MODE=true. This
 	//    is the rollout gate: a deployment can ship the operator image
 	//    with OPERATOR_MODE unset to verify the legacy HTTP path stays
 	//    healthy, then flip the env var to enable webhooks + reconciler
-	//    without a separate image.
+	//    without a separate image. In audit mode the manager runs but
+	//    its webhook handlers + write paths are no-ops via the
+	//    auditclient wrapper and the runtimeCfg gating.
 	if operatorMode {
 		g.Go(func() error {
 			return runManager(

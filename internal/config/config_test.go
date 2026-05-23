@@ -749,3 +749,101 @@ func TestLoad_ExternalSecretsConfigOverrides(t *testing.T) {
 		t.Errorf("ExternalSecretsS3SecretKeyProperty = %q", cfg.ExternalSecretsS3SecretKeyProperty)
 	}
 }
+
+// TestLoadWithOptions_SkipBackend covers the Phase 2.5d audit-mode startup
+// contract: when SkipBackend is true, the config loader must succeed without
+// any backend env vars set, and must NOT default BACKEND_TYPE to "s3".
+//
+// This is the regression guard for the Phase 3 deployment.yaml crash where
+// the audit-mode pod CrashLoopBackOff'd on "S3_ENDPOINT is required" because
+// the (defaulted) BACKEND_TYPE=s3 triggered loadS3Config validation that
+// requires backend credentials the audit-mode binary doesn't actually use.
+func TestLoadWithOptions_SkipBackend_NoEnv(t *testing.T) {
+	clearAllEnv()
+
+	cfg, err := LoadWithOptions(LoadOptions{SkipBackend: true})
+	if err != nil {
+		t.Fatalf("LoadWithOptions(SkipBackend=true) without env returned error: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("LoadWithOptions returned nil config without error")
+	}
+	if cfg.BackendType != "" {
+		t.Errorf("BackendType: got %q, want empty (no defaulting in skip mode)", cfg.BackendType)
+	}
+	if cfg.S3Endpoint != "" {
+		t.Errorf("S3Endpoint: got %q, want empty", cfg.S3Endpoint)
+	}
+	if cfg.KopiaS3Endpoint != "" {
+		t.Errorf("KopiaS3Endpoint: got %q, want empty", cfg.KopiaS3Endpoint)
+	}
+	if cfg.KopiaS3AccessKey != "" {
+		t.Errorf("KopiaS3AccessKey: got %q, want empty", cfg.KopiaS3AccessKey)
+	}
+	if cfg.KopiaS3SecretKey != "" {
+		t.Errorf("KopiaS3SecretKey: got %q, want empty", cfg.KopiaS3SecretKey)
+	}
+	if cfg.KopiaPassword != "" {
+		t.Errorf("KopiaPassword: got %q, want empty", cfg.KopiaPassword)
+	}
+	if cfg.LogLevel == "" {
+		t.Errorf("LogLevel: should have a default even in skip mode, got empty")
+	}
+	if cfg.Port == "" {
+		t.Errorf("Port: should have a default even in skip mode, got empty")
+	}
+}
+
+// TestLoadWithOptions_SkipBackend_IgnoresPartialEnv confirms that even if
+// some backend env vars happen to be set, SkipBackend doesn't read them
+// — audit mode must be hermetic.
+func TestLoadWithOptions_SkipBackend_IgnoresPartialEnv(t *testing.T) {
+	clearAllEnv()
+	t.Setenv(envBackendType, "s3")
+	// Deliberately NOT setting S3_ENDPOINT/etc. With the legacy Load() this
+	// would fail. With SkipBackend it must succeed.
+
+	cfg, err := LoadWithOptions(LoadOptions{SkipBackend: true})
+	if err != nil {
+		t.Fatalf("SkipBackend should tolerate BACKEND_TYPE=s3 without S3_ENDPOINT: %v", err)
+	}
+	// BACKEND_TYPE env value passes through verbatim, but no backend-specific
+	// validation runs.
+	if cfg.BackendType != "s3" {
+		t.Errorf("BackendType (env passthrough): got %q, want %q", cfg.BackendType, "s3")
+	}
+	if cfg.S3Endpoint != "" {
+		t.Errorf("S3Endpoint must not be loaded in skip mode: got %q", cfg.S3Endpoint)
+	}
+}
+
+// TestLoadWithOptions_LegacyMode_StillRequiresBackend protects against
+// accidentally weakening the non-audit codepath. The default (skipBackend=false)
+// must reject missing backend env vars exactly as the legacy Load() did.
+func TestLoadWithOptions_LegacyMode_StillRequiresBackend(t *testing.T) {
+	clearAllEnv()
+	// No env set — legacy code defaults BACKEND_TYPE=s3 and then errors on
+	// missing S3_ENDPOINT.
+	_, err := LoadWithOptions(LoadOptions{SkipBackend: false})
+	if err == nil {
+		t.Fatal("LoadWithOptions(SkipBackend=false) must require backend env; got nil error")
+	}
+	// And the original Load() wrapper must produce the same error.
+	_, err = Load()
+	if err == nil {
+		t.Fatal("Load() must require backend env; got nil error")
+	}
+}
+
+// TestLoadWithOptions_LegacyMode_StillRequiresKopiaS3Backend covers the
+// non-default backend path (BACKEND_TYPE=kopia-s3): missing KOPIA_S3_ENDPOINT
+// must still fail in non-audit mode.
+func TestLoadWithOptions_LegacyMode_StillRequiresKopiaS3Backend(t *testing.T) {
+	clearAllEnv()
+	t.Setenv(envBackendType, "kopia-s3")
+
+	_, err := LoadWithOptions(LoadOptions{SkipBackend: false})
+	if err == nil {
+		t.Fatal("LoadWithOptions(SkipBackend=false) with BACKEND_TYPE=kopia-s3 must require KOPIA_S3_ENDPOINT")
+	}
+}

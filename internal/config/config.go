@@ -86,15 +86,47 @@ type Config struct {
 	ExternalSecretsS3SecretKeyProperty   string
 }
 
+// LoadOptions controls optional behavior of LoadWithOptions. Zero value
+// matches the legacy Load() behavior (full backend validation).
+type LoadOptions struct {
+	// SkipBackend disables BACKEND_TYPE defaulting and skips the
+	// loadS3Config / loadKopiaS3Config validation step. Used by audit-mode
+	// startup paths (Phase 2.5d of docs/pvc-plumber-v4-prd.md in the
+	// talos-argocd-proxmox repo) where the operator must NOT depend on
+	// RustFS / Kopia / S3 / credential env vars to come up.
+	//
+	// When SkipBackend is true:
+	//   - BACKEND_TYPE is read verbatim (empty if unset; NO defaulting to s3)
+	//   - No backend-specific loader runs
+	//   - S3 / Kopia / AWS env vars are not consulted at all
+	//   - The resulting Config has cfg.BackendType either "" or the literal
+	//     env value, and all backend-specific fields are zero
+	// Downstream code that touches backend fields MUST check cfg.BackendType
+	// is non-empty (or that buildBackend was actually called) before using
+	// any backend client.
+	SkipBackend bool
+}
+
+// Load is the legacy entrypoint. Equivalent to LoadWithOptions(LoadOptions{}).
+// Existing callers (cmd/pvc-plumber legacy HTTP binary) keep working
+// unchanged.
 func Load() (*Config, error) {
-	// Common settings
+	return LoadWithOptions(LoadOptions{})
+}
+
+// LoadWithOptions reads operator configuration from environment variables.
+// See LoadOptions for the available knobs.
+func LoadWithOptions(opts LoadOptions) (*Config, error) {
+	// Common settings — backend type validation gated on opts.SkipBackend.
 	backendType := os.Getenv("BACKEND_TYPE")
-	if backendType == "" {
-		backendType = backend.TypeS3
-	}
-	if backendType != backend.TypeS3 && backendType != backend.TypeKopiaS3 {
-		return nil, fmt.Errorf("invalid BACKEND_TYPE: %s (must be %q or %q)",
-			backendType, backend.TypeS3, backend.TypeKopiaS3)
+	if !opts.SkipBackend {
+		if backendType == "" {
+			backendType = backend.TypeS3
+		}
+		if backendType != backend.TypeS3 && backendType != backend.TypeKopiaS3 {
+			return nil, fmt.Errorf("invalid BACKEND_TYPE: %s (must be %q or %q)",
+				backendType, backend.TypeS3, backend.TypeKopiaS3)
+		}
 	}
 
 	httpTimeout := 3 * time.Second
@@ -146,21 +178,24 @@ func Load() (*Config, error) {
 		LogLevel:       logLevel,
 	}
 
-	// Backend-specific validation
-	switch backendType {
-	case backend.TypeS3:
-		if err := loadS3Config(cfg); err != nil {
-			return nil, err
-		}
-	case backend.TypeKopiaS3:
-		if err := loadKopiaS3Config(cfg); err != nil {
-			return nil, err
+	// Backend-specific validation — skipped entirely when opts.SkipBackend.
+	if !opts.SkipBackend {
+		switch backendType {
+		case backend.TypeS3:
+			if err := loadS3Config(cfg); err != nil {
+				return nil, err
+			}
+		case backend.TypeKopiaS3:
+			if err := loadKopiaS3Config(cfg); err != nil {
+				return nil, err
+			}
 		}
 	}
 
-	// ExternalSecret rendering knobs are independent of the existence
-	// backend choice (they configure the per-PVC ES the reconciler renders),
-	// so load them unconditionally.
+	// ExternalSecret rendering knobs are independent of the backend choice
+	// (they configure the per-PVC ES the reconciler renders), so load them
+	// unconditionally — both backend-full and skip-backend startup paths
+	// rely on these defaults / overrides existing.
 	loadExternalSecretsConfig(cfg)
 
 	return cfg, nil
