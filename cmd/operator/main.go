@@ -42,6 +42,8 @@ import (
 
 	"github.com/mitchross/pvc-plumber/internal/config"
 	"github.com/mitchross/pvc-plumber/internal/controller"
+	"github.com/mitchross/pvc-plumber/internal/v4/auditclient"
+	"github.com/mitchross/pvc-plumber/internal/v4/runtimeconfig"
 	pvcwebhook "github.com/mitchross/pvc-plumber/internal/webhook"
 )
 
@@ -131,11 +133,32 @@ func main() {
 	sysNs := parseSystemNamespaces(os.Getenv("SYSTEM_NAMESPACES"))
 	operatorMode := os.Getenv("OPERATOR_MODE") == "true"
 
+	// Phase 2.5: resolve runtime mode (PVC_PLUMBER_MODE → audit default).
+	// The Banner() is the first thing logged so operators see at a glance
+	// whether the binary is in a write-capable mode. The Mode is then
+	// threaded through to runManager so the AuditingClient wrapper can be
+	// constructed when the manager runs.
+	runtimeCfg, runtimeErr := runtimeconfig.Load()
+	if runtimeErr != nil {
+		slogger.Warn("runtime config load returned a warning",
+			"error", runtimeErr,
+			"env_key", runtimeconfig.EnvKey,
+			"raw_value", runtimeCfg.RawModeValue,
+			"effective_mode", runtimeCfg.Mode.String(),
+			"mode_source", runtimeCfg.ModeSource.String(),
+		)
+	}
+	slogger.Info(runtimeCfg.Banner())
+
 	slogger.Info("starting pvc-plumber operator",
 		"backend", cfg.BackendType,
 		"port", cfg.Port,
 		"log_level", cfg.LogLevel,
 		"operator_mode", operatorMode,
+		"pvc_plumber_mode", runtimeCfg.Mode.String(),
+		"mode_source", runtimeCfg.ModeSource.String(),
+		"writes_allowed", runtimeCfg.WritesAllowed(),
+		"webhooks_will_register", runtimeCfg.WebhookRegistrationAllowed(),
 		"system_namespaces", systemNamespacesForLog(sysNs),
 	)
 
@@ -207,6 +230,7 @@ func main() {
 				slogger,
 				bundle,
 				cfg,
+				runtimeCfg,
 				sysNs,
 				metricsAddr, probeAddr,
 				webhookPort, webhookCertDir,
@@ -244,11 +268,24 @@ func runManager(
 	slogger *slog.Logger,
 	bundle *backendBundle,
 	cfg *config.Config,
+	runtimeCfg runtimeconfig.Config,
 	sysNs map[string]struct{},
 	metricsAddr, probeAddr string,
 	webhookPort int, webhookCertDir string,
 	enableLeaderElection bool, leaderElectionID string,
 ) error {
+	// Phase 2.5: leader election uses a coordination.k8s.io/v1 Lease that
+	// is written by a path SEPARATE from mgr.GetClient(). The auditclient
+	// wrapper cannot gate those writes, so we disable leader election
+	// outright in audit mode to honor the "no cluster writes" contract.
+	// Audit-mode deployments are typically single-replica anyway; HA + leader
+	// election are a Phase 8 concern when the operator goes to enforce/strict.
+	if !runtimeCfg.WritesAllowed() && enableLeaderElection {
+		slogger.Info("audit mode: forcing --leader-elect=false to keep Lease writes off the cluster",
+			"mode", runtimeCfg.Mode.String())
+		enableLeaderElection = false
+	}
+
 	slogger.Info("manager starting",
 		"metrics", metricsAddr,
 		"probes", probeAddr,
@@ -280,8 +317,14 @@ func runManager(
 	// renders points at the right ClusterSecretStore / vault item /
 	// property names for this deployment (defaults pin to the reference
 	// cluster's 1Password Connect layout — see internal/config).
+	//
+	// Phase 2.5: wrap mgr.GetClient() with auditclient so every write
+	// the reconciler attempts is gated by runtimeCfg.Mode. In audit mode
+	// the wrapper logs "would-write" and returns nil without touching the
+	// cluster — see internal/v4/auditclient.
+	reconcilerClient := auditclient.New(mgr.GetClient(), runtimeCfg.Mode, slogger)
 	if err := (&controller.PVCReconciler{
-		Client:           mgr.GetClient(),
+		Client:           reconcilerClient,
 		SystemNamespaces: sysNs,
 		ExternalSecret: controller.ExternalSecretConfig{
 			SecretStoreName:       cfg.ExternalSecretsStoreName,
@@ -301,22 +344,38 @@ func runManager(
 	// scheme so it knows how to deserialize core/v1 PVC payloads. Both
 	// handlers receive the same SystemNamespaces / shared cached backend,
 	// keeping behavior identical between reconcile and admission paths.
-	decoder := admission.NewDecoder(mgr.GetScheme())
-	hookSrv := mgr.GetWebhookServer()
-	hookSrv.Register("/mutate-v1-pvc", &webhook.Admission{
-		Handler: &pvcwebhook.PVCMutator{
-			Decoder:          decoder,
-			Kopia:            bundle.cached,
-			SystemNamespaces: sysNs,
-		},
-	})
-	hookSrv.Register("/validate-v1-pvc", &webhook.Admission{
-		Handler: &pvcwebhook.PVCValidator{
-			Decoder:          decoder,
-			Kopia:            bundle.cached,
-			SystemNamespaces: sysNs,
-		},
-	})
+	//
+	// Phase 2.5: skip registration entirely in audit mode. The binary is
+	// safe to deploy without a MutatingWebhookConfiguration /
+	// ValidatingWebhookConfiguration; if one is accidentally created
+	// against this audit-mode binary, the webhook server returns 404 for
+	// the unregistered routes so admission requests simply fall through
+	// to "not handled by this webhook" (kube-apiserver behavior depends on
+	// failurePolicy — but the binary itself contributes zero denials).
+	if runtimeCfg.WebhookRegistrationAllowed() {
+		decoder := admission.NewDecoder(mgr.GetScheme())
+		hookSrv := mgr.GetWebhookServer()
+		hookSrv.Register("/mutate-v1-pvc", &webhook.Admission{
+			Handler: &pvcwebhook.PVCMutator{
+				Decoder:          decoder,
+				Kopia:            bundle.cached,
+				SystemNamespaces: sysNs,
+			},
+		})
+		hookSrv.Register("/validate-v1-pvc", &webhook.Admission{
+			Handler: &pvcwebhook.PVCValidator{
+				Decoder:          decoder,
+				Kopia:            bundle.cached,
+				SystemNamespaces: sysNs,
+			},
+		})
+		slogger.Info("admission webhooks registered",
+			"mode", runtimeCfg.Mode.String(),
+			"paths", []string{"/mutate-v1-pvc", "/validate-v1-pvc"})
+	} else {
+		slogger.Info("admission webhooks NOT registered (audit mode)",
+			"mode", runtimeCfg.Mode.String())
+	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add healthz: %w", err)
