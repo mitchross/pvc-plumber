@@ -20,6 +20,13 @@ import (
 	"github.com/mitchross/pvc-plumber/internal/v4/mode"
 )
 
+// Test-scope constants — repeated fixture strings.
+const (
+	testNSMyapp    = "myapp"
+	testNSNsA      = "ns-a"
+	testSecretName = "preseed"
+)
+
 // makeAuditingClient builds an AuditingClient backed by a fake client.
 // Returns the wrapper, the underlying fake (so tests can introspect it),
 // and a captured slog buffer.
@@ -56,17 +63,17 @@ func TestAuditMode_BlocksAllWriteVerbs(t *testing.T) {
 	ac, fakeC, buf := makeAuditingClient(t, mode.Audit)
 
 	// Create — must not appear in the fake.
-	if err := ac.Create(ctx, pvcFixture("myapp", "data")); err != nil {
+	if err := ac.Create(ctx, pvcFixture(testNSMyapp, "data")); err != nil {
 		t.Fatalf("audit Create returned error: %v", err)
 	}
 	got := &corev1.PersistentVolumeClaim{}
-	err := fakeC.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "data"}, got)
+	err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: "data"}, got)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("audit Create leaked through: fake has the object (err=%v)", err)
 	}
 
 	// Seed an object so Update / Patch / Delete have a target.
-	preexisting := secretFixture("myapp", "preseed")
+	preexisting := secretFixture(testNSMyapp, "preseed")
 	if err := fakeC.Create(ctx, preexisting); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +85,7 @@ func TestAuditMode_BlocksAllWriteVerbs(t *testing.T) {
 		t.Fatalf("audit Update returned error: %v", err)
 	}
 	gotSec := &corev1.Secret{}
-	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "preseed"}, gotSec); err != nil {
+	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: testSecretName}, gotSec); err != nil {
 		t.Fatal(err)
 	}
 	if _, has := gotSec.Annotations["audit-test"]; has {
@@ -92,7 +99,7 @@ func TestAuditMode_BlocksAllWriteVerbs(t *testing.T) {
 	if err := ac.Patch(ctx, patched, mergePatch); err != nil {
 		t.Fatalf("audit Patch returned error: %v", err)
 	}
-	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "preseed"}, gotSec); err != nil {
+	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: testSecretName}, gotSec); err != nil {
 		t.Fatal(err)
 	}
 	if _, has := gotSec.Labels["audit-test"]; has {
@@ -103,15 +110,15 @@ func TestAuditMode_BlocksAllWriteVerbs(t *testing.T) {
 	if err := ac.Delete(ctx, preexisting); err != nil {
 		t.Fatalf("audit Delete returned error: %v", err)
 	}
-	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "preseed"}, gotSec); err != nil {
+	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: testSecretName}, gotSec); err != nil {
 		t.Errorf("audit Delete leaked through: object no longer in fake (err=%v)", err)
 	}
 
 	// DeleteAllOf — must not delete anything.
-	if err := ac.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace("myapp")); err != nil {
+	if err := ac.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace(testNSMyapp)); err != nil {
 		t.Fatalf("audit DeleteAllOf returned error: %v", err)
 	}
-	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "preseed"}, gotSec); err != nil {
+	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: testSecretName}, gotSec); err != nil {
 		t.Errorf("audit DeleteAllOf leaked through: pre-seeded object is gone (err=%v)", err)
 	}
 
@@ -161,13 +168,13 @@ func TestNonAuditMode_WritesPassThrough(t *testing.T) {
 			ctx := context.Background()
 			ac, fakeC, _ := makeAuditingClient(t, m)
 
-			obj := pvcFixture("myapp", "live-write")
+			obj := pvcFixture(testNSMyapp, "live-write")
 			if err := ac.Create(ctx, obj); err != nil {
 				t.Fatalf("%s Create error: %v", m, err)
 			}
 
 			got := &corev1.PersistentVolumeClaim{}
-			if err := fakeC.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "live-write"}, got); err != nil {
+			if err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: "live-write"}, got); err != nil {
 				t.Errorf("%s Create did NOT propagate to fake: %v", m, err)
 			}
 
@@ -185,12 +192,12 @@ func TestNonAuditMode_WritesPassThrough(t *testing.T) {
 // TestAuditMode_ReadsPassThrough confirms Get/List are not affected.
 func TestAuditMode_ReadsPassThrough(t *testing.T) {
 	ctx := context.Background()
-	seed := pvcFixture("myapp", "seeded-pvc")
+	seed := pvcFixture(testNSMyapp, "seeded-pvc")
 	ac, _, _ := makeAuditingClient(t, mode.Audit, seed)
 
 	// Get
 	got := &corev1.PersistentVolumeClaim{}
-	if err := ac.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "seeded-pvc"}, got); err != nil {
+	if err := ac.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: "seeded-pvc"}, got); err != nil {
 		t.Fatalf("Get failed in audit mode: %v", err)
 	}
 	if got.Name != "seeded-pvc" {
@@ -199,7 +206,7 @@ func TestAuditMode_ReadsPassThrough(t *testing.T) {
 
 	// List
 	var list corev1.PersistentVolumeClaimList
-	if err := ac.List(ctx, &list, client.InNamespace("myapp")); err != nil {
+	if err := ac.List(ctx, &list, client.InNamespace(testNSMyapp)); err != nil {
 		t.Fatalf("List failed in audit mode: %v", err)
 	}
 	if len(list.Items) != 1 {
@@ -212,11 +219,11 @@ func TestAuditMode_ReadsPassThrough(t *testing.T) {
 func TestAuditMode_DefenseInDepthUnspecified(t *testing.T) {
 	ctx := context.Background()
 	ac, fakeC, _ := makeAuditingClient(t, mode.Unspecified)
-	if err := ac.Create(ctx, pvcFixture("myapp", "should-be-blocked")); err != nil {
+	if err := ac.Create(ctx, pvcFixture(testNSMyapp, "should-be-blocked")); err != nil {
 		t.Fatal(err)
 	}
 	got := &corev1.PersistentVolumeClaim{}
-	err := fakeC.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "should-be-blocked"}, got)
+	err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: "should-be-blocked"}, got)
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("Unspecified mode allowed write through: %v", err)
 	}
@@ -225,7 +232,7 @@ func TestAuditMode_DefenseInDepthUnspecified(t *testing.T) {
 // TestStatusWriter_AuditGated covers Status() sub-resource path.
 func TestStatusWriter_AuditGated(t *testing.T) {
 	ctx := context.Background()
-	seed := pvcFixture("myapp", "status-target")
+	seed := pvcFixture(testNSMyapp, "status-target")
 	ac, fakeC, buf := makeAuditingClient(t, mode.Audit, seed)
 
 	updated := seed.DeepCopy()
@@ -235,7 +242,7 @@ func TestStatusWriter_AuditGated(t *testing.T) {
 	}
 
 	got := &corev1.PersistentVolumeClaim{}
-	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "status-target"}, got); err != nil {
+	if err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: "status-target"}, got); err != nil {
 		t.Fatal(err)
 	}
 	if got.Status.Phase == corev1.ClaimBound {
@@ -251,10 +258,10 @@ func TestWouldWriteByKind(t *testing.T) {
 	ctx := context.Background()
 	ac, _, _ := makeAuditingClient(t, mode.Audit)
 
-	_ = ac.Create(ctx, pvcFixture("ns-a", "p1"))
-	_ = ac.Create(ctx, pvcFixture("ns-a", "p2"))
-	_ = ac.Create(ctx, secretFixture("ns-a", "s1"))
-	_ = ac.Delete(ctx, secretFixture("ns-a", "s1"))
+	_ = ac.Create(ctx, pvcFixture(testNSNsA, "p1"))
+	_ = ac.Create(ctx, pvcFixture(testNSNsA, "p2"))
+	_ = ac.Create(ctx, secretFixture(testNSNsA, "s1"))
+	_ = ac.Delete(ctx, secretFixture(testNSNsA, "s1"))
 
 	byKind := ac.WouldWriteByKind()
 	want := map[string]int64{
@@ -292,7 +299,7 @@ func TestConstructor_NilLogger(t *testing.T) {
 // confirms the wrapper is transparent for every write verb.
 func TestNonAuditMode_AllWriteVerbsPassThrough(t *testing.T) {
 	ctx := context.Background()
-	seed := secretFixture("ns-a", "victim")
+	seed := secretFixture(testNSNsA, testSecretName)
 	ac, fakeC, _ := makeAuditingClient(t, mode.Enforce, seed)
 
 	// Update
@@ -301,7 +308,7 @@ func TestNonAuditMode_AllWriteVerbsPassThrough(t *testing.T) {
 		t.Fatalf("enforce Update: %v", err)
 	}
 	got := &corev1.Secret{}
-	_ = fakeC.Get(ctx, types.NamespacedName{Namespace: "ns-a", Name: "victim"}, got)
+	_ = fakeC.Get(ctx, types.NamespacedName{Namespace: testNSNsA, Name: testSecretName}, got)
 	if got.Annotations["phase2.5"] != "did-update" {
 		t.Errorf("enforce Update did not propagate")
 	}
@@ -313,7 +320,7 @@ func TestNonAuditMode_AllWriteVerbsPassThrough(t *testing.T) {
 	if err := ac.Patch(ctx, patched, client.MergeFrom(original)); err != nil {
 		t.Fatalf("enforce Patch: %v", err)
 	}
-	_ = fakeC.Get(ctx, types.NamespacedName{Namespace: "ns-a", Name: "victim"}, got)
+	_ = fakeC.Get(ctx, types.NamespacedName{Namespace: testNSNsA, Name: testSecretName}, got)
 	if got.Labels["phase2.5"] != "did-patch" {
 		t.Errorf("enforce Patch did not propagate")
 	}
@@ -322,24 +329,29 @@ func TestNonAuditMode_AllWriteVerbsPassThrough(t *testing.T) {
 	if err := ac.Delete(ctx, seed); err != nil {
 		t.Fatalf("enforce Delete: %v", err)
 	}
-	_ = fakeC.Get(ctx, types.NamespacedName{Namespace: "ns-a", Name: "victim"}, got)
-	if got.Name != "" {
-		// fake client clears the object on NotFound; if name is non-empty
-		// the delete was a no-op
+	// The fake client returns NotFound on Get of a deleted object and
+	// zeroes the destination struct. A non-empty Name here would mean
+	// Delete didn't actually remove the object. We don't fail the test
+	// on the converse (some fake-client versions may surface a zero
+	// object without Get returning NotFound), but we do assert deletion
+	// happened.
+	err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSNsA, Name: testSecretName}, got)
+	if err == nil && got.Name == "victim" {
+		t.Errorf("enforce Delete did not propagate: victim still present")
 	}
 
 	// Reseed and DeleteAllOf.
-	if err := fakeC.Create(ctx, secretFixture("ns-a", "doomed-1")); err != nil {
+	if err := fakeC.Create(ctx, secretFixture(testNSNsA, "doomed-1")); err != nil {
 		t.Fatal(err)
 	}
-	if err := fakeC.Create(ctx, secretFixture("ns-a", "doomed-2")); err != nil {
+	if err := fakeC.Create(ctx, secretFixture(testNSNsA, "doomed-2")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ac.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace("ns-a")); err != nil {
+	if err := ac.DeleteAllOf(ctx, &corev1.Secret{}, client.InNamespace(testNSNsA)); err != nil {
 		t.Fatalf("enforce DeleteAllOf: %v", err)
 	}
 	var remaining corev1.SecretList
-	_ = fakeC.List(ctx, &remaining, client.InNamespace("ns-a"))
+	_ = fakeC.List(ctx, &remaining, client.InNamespace(testNSNsA))
 	if len(remaining.Items) != 0 {
 		t.Errorf("enforce DeleteAllOf did not propagate: %d items remain", len(remaining.Items))
 	}
@@ -354,7 +366,7 @@ func TestNonAuditMode_AllWriteVerbsPassThrough(t *testing.T) {
 // a status update via the SubResourceClient API (rare but supported).
 func TestSubResourceClient_AuditGated(t *testing.T) {
 	ctx := context.Background()
-	seed := pvcFixture("ns-a", "subres-target")
+	seed := pvcFixture(testNSNsA, "subres-target")
 	ac, fakeC, buf := makeAuditingClient(t, mode.Audit, seed)
 
 	updated := seed.DeepCopy()
@@ -363,7 +375,7 @@ func TestSubResourceClient_AuditGated(t *testing.T) {
 		t.Fatalf("SubResource('status').Update in audit: %v", err)
 	}
 	got := &corev1.PersistentVolumeClaim{}
-	_ = fakeC.Get(ctx, types.NamespacedName{Namespace: "ns-a", Name: "subres-target"}, got)
+	_ = fakeC.Get(ctx, types.NamespacedName{Namespace: testNSNsA, Name: "subres-target"}, got)
 	if got.Status.Phase == corev1.ClaimBound {
 		t.Errorf("SubResource('status').Update leaked through")
 	}
@@ -371,12 +383,11 @@ func TestSubResourceClient_AuditGated(t *testing.T) {
 		t.Errorf("SubResource log missing subresource=status; got:\n%s", buf.String())
 	}
 
-	// And the Get on SubResource passes through.
-	if err := ac.SubResource("status").Get(ctx, seed, &corev1.PersistentVolumeClaim{}); err == nil {
-		// fake client returns an error here because /status isn't a real
-		// sub-resource on PVCs in the fake; we accept either outcome since
-		// we only care that the call reaches the wrapped client.
-	}
+	// And the Get on SubResource passes through. We don't care whether
+	// the fake client returns an error (it may, since /status isn't a
+	// real sub-resource on PVCs in the fake) — we only care that the
+	// call reaches the wrapped client and doesn't panic.
+	_ = ac.SubResource("status").Get(ctx, seed, &corev1.PersistentVolumeClaim{})
 }
 
 // TestAuditMode_NoEventCreation defends the "no cluster writes" contract
@@ -410,7 +421,7 @@ func TestAuditMode_NoEventCreation(t *testing.T) {
 	}
 
 	got := &corev1.Event{}
-	err := fakeC.Get(ctx, types.NamespacedName{Namespace: "myapp", Name: "data.test.event"}, got)
+	err := fakeC.Get(ctx, types.NamespacedName{Namespace: testNSMyapp, Name: "data.test.event"}, got)
 	if !apierrors.IsNotFound(err) {
 		t.Errorf("audit Create of Event leaked through: fake has the Event (err=%v)", err)
 	}

@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+// Test-scope constants for repeated PVC name fixtures.
+const (
+	testPVCStorage = "storage"
+	testPVCConfig  = "config"
+)
+
 func TestParseStrategy(t *testing.T) {
 	cases := []struct {
 		in      string
@@ -12,10 +18,10 @@ func TestParseStrategy(t *testing.T) {
 		wantErr bool
 	}{
 		{"", StrategyBareDst, false},
-		{"bare-dst", StrategyBareDst, false},
+		{strategyStrBareDst, StrategyBareDst, false},
 		{"BARE-DST", StrategyBareDst, false},
 		{"  legacy-backup  ", StrategyLegacyBackup, false},
-		{"dst-src", StrategyDstSrc, false},
+		{strategyStrDstSrc, StrategyDstSrc, false},
 		{"made-up", StrategyBareDst, true},
 	}
 	for _, tc := range cases {
@@ -43,17 +49,17 @@ func TestCompute(t *testing.T) {
 		{
 			name:     "bare-dst short pvc (default)",
 			strategy: StrategyBareDst,
-			pvc:      "storage",
+			pvc:      testPVCStorage,
 			repo:     "volsync-kopia-repository",
-			wantRS:   "storage",
+			wantRS:   testPVCStorage,
 			wantRD:   "storage-dst",
 		},
 		{
 			name:     "bare-dst matches talos inline convention (jellyfin/config)",
 			strategy: StrategyBareDst,
-			pvc:      "config",
+			pvc:      testPVCConfig,
 			repo:     DefaultRepoSecretName,
-			wantRS:   "config",
+			wantRS:   testPVCConfig,
 			wantRD:   "config-dst",
 		},
 		{
@@ -118,7 +124,7 @@ func TestLabelSafeRef(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"short pvc passes through", "storage", "storage"},
+		{"short pvc passes through", testPVCStorage, testPVCStorage},
 		{"exactly 63 chars passes through", strings.Repeat("x", 63), strings.Repeat("x", 63)},
 		{"long pvc hashed", strings.Repeat("a-very-long-pvc-name-", 5), ""}, // checked below
 		{"empty", "", ""},
@@ -162,7 +168,7 @@ func TestIdentityFor(t *testing.T) {
 		{
 			name:     "default identity (ns/pvc convention)",
 			ns:       "open-webui",
-			pvc:      "storage",
+			pvc:      testPVCStorage,
 			wantUser: "storage",
 			wantHost: "open-webui",
 		},
@@ -177,7 +183,7 @@ func TestIdentityFor(t *testing.T) {
 		{
 			name:     "empty override is treated as unset",
 			ns:       "jellyfin",
-			pvc:      "config",
+			pvc:      testPVCConfig,
 			override: "",
 			wantUser: "config",
 			wantHost: "jellyfin",

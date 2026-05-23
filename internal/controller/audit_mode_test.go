@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -58,30 +59,23 @@ func TestAuditMode_PVCReconciler_NoWrites(t *testing.T) {
 	// of the three children that the live reconciler would have created
 	// may be visible to the underlying fake client.
 	for _, want := range []struct {
-		gvk  string
+		gvk  schema.GroupVersionKind
 		name string
 	}{
-		{"ExternalSecret", testESName},
-		{"ReplicationSource", testRSDestName},
-		{"ReplicationDestination", testRSDestName},
+		{esGVK, testESName},
+		{rsGVK, testRSDestName},
+		{rdGVK, testRSDestName},
 	} {
-		t.Run("absent/"+want.gvk, func(t *testing.T) {
-			var gvk = esGVK
-			switch want.gvk {
-			case "ReplicationSource":
-				gvk = rsGVK
-			case "ReplicationDestination":
-				gvk = rdGVK
-			}
+		t.Run("absent/"+want.gvk.Kind, func(t *testing.T) {
 			obj := &unstructured.Unstructured{}
-			obj.SetGroupVersionKind(gvk)
+			obj.SetGroupVersionKind(want.gvk)
 			err := fakeCli.Get(context.Background(),
 				types.NamespacedName{Namespace: testNamespace, Name: want.name},
 				obj,
 			)
 			if !apierrors.IsNotFound(err) {
 				t.Errorf("audit mode leaked through: fake client has %s %s/%s (err=%v)",
-					want.gvk, testNamespace, want.name, err)
+					want.gvk.Kind, testNamespace, want.name, err)
 			}
 		})
 	}
@@ -186,27 +180,14 @@ func TestAuditMode_PVCReconciler_ReapPathBlocked(t *testing.T) {
 	// All three children must still exist in the fake client.
 	for _, target := range []struct {
 		name string
-		gvk  any
+		gvk  schema.GroupVersionKind
 	}{
 		{testESName, esGVK},
 		{testRSDestName, rsGVK},
 		{testRSDestName, rdGVK},
 	} {
 		obj := &unstructured.Unstructured{}
-		switch gvk := target.gvk.(type) {
-		case interface{ String() string }:
-			obj.SetGroupVersionKind(esGVK) // dummy; replaced below
-			_ = gvk
-		}
-		// Re-set the proper GVK directly from the literal.
-		switch target.gvk {
-		case esGVK:
-			obj.SetGroupVersionKind(esGVK)
-		case rsGVK:
-			obj.SetGroupVersionKind(rsGVK)
-		case rdGVK:
-			obj.SetGroupVersionKind(rdGVK)
-		}
+		obj.SetGroupVersionKind(target.gvk)
 		err := fakeCli.Get(context.Background(), types.NamespacedName{Namespace: testNamespace, Name: target.name}, obj)
 		if err != nil {
 			t.Errorf("audit mode reap leaked: %s/%s is missing (err=%v) — Delete should have been a no-op",

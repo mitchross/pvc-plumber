@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+// String forms of Tier. Private constants so the linter doesn't flag
+// repeated literals; tests in this package reference these too.
+const (
+	tierStrHourly   = "hourly"
+	tierStrDaily    = "daily"
+	tierStrWeekly   = "weekly"
+	tierStrManual   = "manual"
+	tierStrDisabled = "disabled"
+)
+
 // Tier is the backup cadence declared on a PVC.
 type Tier int
 
@@ -23,15 +33,15 @@ const (
 func (t Tier) String() string {
 	switch t {
 	case TierHourly:
-		return "hourly"
+		return tierStrHourly
 	case TierDaily:
-		return "daily"
+		return tierStrDaily
 	case TierWeekly:
-		return "weekly"
+		return tierStrWeekly
 	case TierManual:
-		return "manual"
+		return tierStrManual
 	case TierDisabled:
-		return "disabled"
+		return tierStrDisabled
 	default:
 		return "unspecified"
 	}
@@ -44,15 +54,15 @@ func parseTier(raw string) (Tier, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
 		return TierUnspecified, nil
-	case "hourly":
+	case tierStrHourly:
 		return TierHourly, nil
-	case "daily":
+	case tierStrDaily:
 		return TierDaily, nil
-	case "weekly":
+	case tierStrWeekly:
 		return TierWeekly, nil
-	case "manual":
+	case tierStrManual:
 		return TierManual, nil
-	case "disabled":
+	case tierStrDisabled:
 		return TierDisabled, nil
 	default:
 		return TierUnspecified, fmt.Errorf("invalid tier %q (expected hourly|daily|weekly|manual|disabled)", raw)

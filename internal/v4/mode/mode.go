@@ -9,6 +9,20 @@ import (
 	"strings"
 )
 
+// String forms of the Mode and RestoreMode enums. These constants exist
+// to satisfy goconst (and to give tests + ParseMode a single source of
+// truth for the wire string). Private; cross-package tests use their own
+// local constants.
+const (
+	modeStrUnspecified = "unspecified"
+	modeStrAudit       = "audit"
+	modeStrPermissive  = "permissive"
+	modeStrEnforce     = "enforce"
+	modeStrStrict      = "strict"
+	restoreStrNever    = "never"
+	restoreStrForce    = "force"
+)
+
 // Mode is the global / per-namespace / per-PVC operator behavior.
 type Mode int
 
@@ -42,15 +56,15 @@ const (
 func (m Mode) String() string {
 	switch m {
 	case Audit:
-		return "audit"
+		return modeStrAudit
 	case Permissive:
-		return "permissive"
+		return modeStrPermissive
 	case Enforce:
-		return "enforce"
+		return modeStrEnforce
 	case Strict:
-		return "strict"
+		return modeStrStrict
 	default:
-		return "unspecified"
+		return modeStrUnspecified
 	}
 }
 
@@ -61,13 +75,13 @@ func ParseMode(raw string) (Mode, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
 		return Unspecified, nil
-	case "audit":
+	case modeStrAudit:
 		return Audit, nil
-	case "permissive":
+	case modeStrPermissive:
 		return Permissive, nil
-	case "enforce":
+	case modeStrEnforce:
 		return Enforce, nil
-	case "strict":
+	case modeStrStrict:
 		return Strict, nil
 	default:
 		return Unspecified, fmt.Errorf("invalid mode %q (expected audit|permissive|enforce|strict)", raw)
@@ -96,19 +110,19 @@ const (
 func (r RestoreMode) String() string {
 	switch r {
 	case RestoreAudit:
-		return "audit"
+		return modeStrAudit
 	case RestorePermissive:
-		return "permissive"
+		return modeStrPermissive
 	case RestoreEnforce:
-		return "enforce"
+		return modeStrEnforce
 	case RestoreStrict:
-		return "strict"
+		return modeStrStrict
 	case RestoreNever:
-		return "never"
+		return restoreStrNever
 	case RestoreForce:
-		return "force"
+		return restoreStrForce
 	default:
-		return "unspecified"
+		return modeStrUnspecified
 	}
 }
 
@@ -118,17 +132,17 @@ func ParseRestoreMode(raw string) (RestoreMode, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "":
 		return RestoreUnspecified, nil
-	case "audit":
+	case modeStrAudit:
 		return RestoreAudit, nil
-	case "permissive":
+	case modeStrPermissive:
 		return RestorePermissive, nil
-	case "enforce":
+	case modeStrEnforce:
 		return RestoreEnforce, nil
-	case "strict":
+	case modeStrStrict:
 		return RestoreStrict, nil
-	case "never":
+	case restoreStrNever:
 		return RestoreNever, nil
-	case "force":
+	case restoreStrForce:
 		return RestoreForce, nil
 	default:
 		return RestoreUnspecified, fmt.Errorf("invalid restore-mode %q (expected audit|permissive|enforce|strict|never|force)", raw)

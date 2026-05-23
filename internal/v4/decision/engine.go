@@ -15,6 +15,14 @@ const VolSyncAPIGroup = "volsync.backube"
 // VolSyncRDKind is the kind for the dataSourceRef target.
 const VolSyncRDKind = "ReplicationDestination"
 
+// Repeated string literals lifted to private constants so the linter
+// doesn't flag occurrences. eventTypeWarning matches corev1.EventTypeWarning;
+// it's a local const so the decision package can stay pure (no k8s imports).
+const (
+	eventTypeWarning              = "Warning"
+	eventReasonBackupStateUnknown = "BackupStateUnknown"
+)
+
 // Decide is the pure decision function. Given an Input it returns an
 // Output describing the admission verdict, whether to mutate, the
 // dataSourceRef target (if any), and the reason in machine + human form.
@@ -124,7 +132,7 @@ func Decide(in Input) Output {
 		case mode.Audit, mode.Permissive:
 			out.Events = append(out.Events, Event{
 				Reason:  "InvalidLabelOrAnnotation",
-				Type:    "Warning",
+				Type:    eventTypeWarning,
 				Message: joinErrorMessages(in.LabelSpec.Errors),
 			})
 			out.Severity = SeverityWarn
@@ -198,7 +206,7 @@ func Decide(in Input) Output {
 			}
 			out.Events = append(out.Events, Event{
 				Reason:  "CacheStale",
-				Type:    "Warning",
+				Type:    eventTypeWarning,
 				Message: fmt.Sprintf("cache is stale for identity %s but reports BackupExists; proceeding under %s mode", out.BackupIdentity, in.Resolved.Mode),
 			})
 			out.MetricsIncrement = append(out.MetricsIncrement, "pvc_plumber_cache_stale_warn_total")
@@ -243,7 +251,7 @@ func Decide(in Input) Output {
 		if in.CacheFreshness == CacheStale {
 			out.Events = append(out.Events, Event{
 				Reason:  "CacheStale",
-				Type:    "Warning",
+				Type:    eventTypeWarning,
 				Message: fmt.Sprintf("cache is stale; reporting BackupMissing for %s under %s mode", out.BackupIdentity, in.Resolved.Mode),
 			})
 		}
@@ -269,8 +277,8 @@ func Decide(in Input) Output {
 			out.Message = fmt.Sprintf("permissive mode: backup state is unknown for %s; allowing with warning", out.BackupIdentity)
 			out.Severity = SeverityWarn
 			out.Events = append(out.Events, Event{
-				Reason:  "BackupStateUnknown",
-				Type:    "Warning",
+				Reason:  eventReasonBackupStateUnknown,
+				Type:    eventTypeWarning,
 				Message: out.Message,
 			})
 			out.MetricsIncrement = append(out.MetricsIncrement, "pvc_plumber_backup_unknown_total")
@@ -279,8 +287,8 @@ func Decide(in Input) Output {
 			out.Message = fmt.Sprintf("audit mode: backup state is unknown for %s; observe-only", out.BackupIdentity)
 			out.Severity = SeverityWarn
 			out.Events = append(out.Events, Event{
-				Reason:  "BackupStateUnknown",
-				Type:    "Warning",
+				Reason:  eventReasonBackupStateUnknown,
+				Type:    eventTypeWarning,
 				Message: out.Message,
 			})
 			out.MetricsIncrement = append(out.MetricsIncrement, "pvc_plumber_backup_unknown_total")
@@ -302,7 +310,7 @@ func Decide(in Input) Output {
 		}
 		out.Events = append(out.Events, Event{
 			Reason:  "DuplicateBackupIdentity",
-			Type:    "Warning",
+			Type:    eventTypeWarning,
 			Message: fmt.Sprintf("backup identity %q is also in use by %s/%s", dup.Identity, dup.Namespace, dup.PVCName),
 		})
 		out.MetricsIncrement = append(out.MetricsIncrement, "pvc_plumber_duplicate_identity_total")
@@ -354,7 +362,7 @@ func applyAuditOverride(in Input, out Output) Output {
 	out.Severity = SeverityWarn
 	out.Events = append(out.Events, Event{
 		Reason:  "WouldDeny",
-		Type:    "Warning",
+		Type:    eventTypeWarning,
 		Message: fmt.Sprintf("audit mode override: would have denied with reason=%s — %s", originalReason, out.Message),
 	})
 	// Add a metric label so audit-mode would-denies can be tracked.

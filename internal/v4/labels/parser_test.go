@@ -6,6 +6,12 @@ import (
 	"time"
 )
 
+// Test-scope constants.
+const (
+	labelTrue  = "true"
+	labelFalse = "false"
+)
+
 func TestParse_OptInSignals(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -22,20 +28,20 @@ func TestParse_OptInSignals(t *testing.T) {
 		},
 		{
 			name:     "new label only",
-			labels:   map[string]string{LabelEnabled: "true", LabelTier: "hourly"},
+			labels:   map[string]string{LabelEnabled: labelTrue, LabelTier: tierStrHourly},
 			wantOrig: OriginNew,
 			wantEnab: true,
 			wantTier: TierHourly,
 		},
 		{
 			name:     "legacy only",
-			labels:   map[string]string{LegacyLabelBackup: "daily"},
+			labels:   map[string]string{LegacyLabelBackup: tierStrDaily},
 			wantOrig: OriginLegacyOnly,
 			wantTier: TierDaily,
 		},
 		{
 			name:     "both — admission honors new, migration sees both",
-			labels:   map[string]string{LabelEnabled: "true", LabelTier: "weekly", LegacyLabelBackup: "daily"},
+			labels:   map[string]string{LabelEnabled: labelTrue, LabelTier: tierStrWeekly, LegacyLabelBackup: tierStrDaily},
 			wantOrig: OriginBoth,
 			wantEnab: true,
 			wantTier: TierWeekly, // new takes precedence
@@ -47,14 +53,14 @@ func TestParse_OptInSignals(t *testing.T) {
 		},
 		{
 			name:     "enabled with whitespace",
-			labels:   map[string]string{LabelEnabled: "  true  ", LabelTier: "manual"},
+			labels:   map[string]string{LabelEnabled: "  true  ", LabelTier: tierStrManual},
 			wantOrig: OriginNew,
 			wantEnab: true,
 			wantTier: TierManual,
 		},
 		{
 			name:     "invalid tier surfaces as error, tier stays unspecified",
-			labels:   map[string]string{LabelEnabled: "true", LabelTier: "every-5-min"},
+			labels:   map[string]string{LabelEnabled: labelTrue, LabelTier: "every-5-min"},
 			wantOrig: OriginNew,
 			wantEnab: true,
 			wantTier: TierUnspecified,
@@ -68,7 +74,7 @@ func TestParse_OptInSignals(t *testing.T) {
 		},
 		{
 			name:     "tier=disabled is a valid declaration (RS suppressed)",
-			labels:   map[string]string{LabelEnabled: "true", LabelTier: "disabled"},
+			labels:   map[string]string{LabelEnabled: labelTrue, LabelTier: tierStrDisabled},
 			wantOrig: OriginNew,
 			wantEnab: true,
 			wantTier: TierDisabled,
@@ -109,20 +115,20 @@ func TestParse_BackupExemptContract(t *testing.T) {
 		},
 		{
 			name:       "valid: exempt=true + FQ reason",
-			labels:     map[string]string{LegacyLabelBackupExempt: "true"},
+			labels:     map[string]string{LegacyLabelBackupExempt: labelTrue},
 			anns:       map[string]string{LegacyAnnotationBackupExemptReasonFQ: "NAS-backed, non-snapshottable"},
 			wantKind:   ExemptValid,
 			wantReason: "NAS-backed, non-snapshottable",
 		},
 		{
 			name:     "INVALID: exempt=true with no reason annotation at all",
-			labels:   map[string]string{LegacyLabelBackupExempt: "true"},
+			labels:   map[string]string{LegacyLabelBackupExempt: labelTrue},
 			wantKind: ExemptMissingReason,
 			wantErrs: 1,
 		},
 		{
 			name:   "INVALID: exempt=true with empty FQ reason (whitespace only)",
-			labels: map[string]string{LegacyLabelBackupExempt: "true"},
+			labels: map[string]string{LegacyLabelBackupExempt: labelTrue},
 			anns: map[string]string{
 				LegacyAnnotationBackupExemptReasonFQ: "   ",
 			},
@@ -131,7 +137,7 @@ func TestParse_BackupExemptContract(t *testing.T) {
 		},
 		{
 			name:   "INVALID: exempt=true with ONLY the bare reason key (silent-fail landmine)",
-			labels: map[string]string{LegacyLabelBackupExempt: "true"},
+			labels: map[string]string{LegacyLabelBackupExempt: labelTrue},
 			anns: map[string]string{
 				"backup-exempt-reason": "would silently fail without FQ key",
 			},
@@ -140,7 +146,7 @@ func TestParse_BackupExemptContract(t *testing.T) {
 		},
 		{
 			name:     "exempt=false treated as none",
-			labels:   map[string]string{LegacyLabelBackupExempt: "false"},
+			labels:   map[string]string{LegacyLabelBackupExempt: labelFalse},
 			wantKind: ExemptNone,
 		},
 	}
@@ -242,18 +248,18 @@ func TestParse_SkipRestoreContract(t *testing.T) {
 		{name: "neither", wantSkip: false, wantReason: ""},
 		{
 			name:       "skip=true with reason",
-			anns:       map[string]string{AnnotationSkipRestore: "true", AnnotationSkipRestoreReason: "DR drill 2026-06-01"},
+			anns:       map[string]string{AnnotationSkipRestore: labelTrue, AnnotationSkipRestoreReason: "DR drill 2026-06-01"},
 			wantSkip:   true,
 			wantReason: "DR drill 2026-06-01",
 		},
 		{
 			name:     "skip=true without reason — parser does NOT reject; engine will",
-			anns:     map[string]string{AnnotationSkipRestore: "true"},
+			anns:     map[string]string{AnnotationSkipRestore: labelTrue},
 			wantSkip: true,
 		},
 		{
 			name:     "skip=false",
-			anns:     map[string]string{AnnotationSkipRestore: "false"},
+			anns:     map[string]string{AnnotationSkipRestore: labelFalse},
 			wantSkip: false,
 		},
 	}
@@ -361,7 +367,7 @@ func TestNamespaceHasPrivilegedMovers(t *testing.T) {
 	}{
 		{name: "nil map", want: false},
 		{name: "absent", in: map[string]string{}, want: false},
-		{name: "true lowercase", in: map[string]string{NamespacePrivilegedMoversLabel: "true"}, want: true},
+		{name: "true lowercase", in: map[string]string{NamespacePrivilegedMoversLabel: labelTrue}, want: true},
 		{name: "True case", in: map[string]string{NamespacePrivilegedMoversLabel: "True"}, want: true},
 		{name: "TRUE upper", in: map[string]string{NamespacePrivilegedMoversLabel: "TRUE"}, want: true},
 		{name: "false", in: map[string]string{NamespacePrivilegedMoversLabel: "false"}, want: false},

@@ -22,6 +22,14 @@ import (
 	"strings"
 )
 
+// String forms of Strategy. Private constants so the linter doesn't flag
+// repeated literals; tests in this package reference these too.
+const (
+	strategyStrBareDst      = "bare-dst"
+	strategyStrLegacyBackup = "legacy-backup"
+	strategyStrDstSrc       = "dst-src"
+)
+
 // Strategy selects a deterministic naming scheme for generated children.
 type Strategy int
 
@@ -45,11 +53,11 @@ const (
 func (s Strategy) String() string {
 	switch s {
 	case StrategyLegacyBackup:
-		return "legacy-backup"
+		return strategyStrLegacyBackup
 	case StrategyDstSrc:
-		return "dst-src"
+		return strategyStrDstSrc
 	default:
-		return "bare-dst"
+		return strategyStrBareDst
 	}
 }
 
@@ -58,11 +66,11 @@ func (s Strategy) String() string {
 // nil error. Any other value errors.
 func ParseStrategy(raw string) (Strategy, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "bare-dst":
+	case "", strategyStrBareDst:
 		return StrategyBareDst, nil
-	case "legacy-backup":
+	case strategyStrLegacyBackup:
 		return StrategyLegacyBackup, nil
-	case "dst-src":
+	case strategyStrDstSrc:
 		return StrategyDstSrc, nil
 	default:
 		return StrategyBareDst, fmt.Errorf("invalid naming strategy %q (expected bare-dst|legacy-backup|dst-src)", raw)

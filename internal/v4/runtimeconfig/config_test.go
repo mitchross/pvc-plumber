@@ -7,6 +7,14 @@ import (
 	"github.com/mitchross/pvc-plumber/internal/v4/mode"
 )
 
+// Test-scope constants for mode string values (same wire form the
+// mode package exposes via ParseMode, kept private there).
+const (
+	valPermissive = "permissive"
+	valEnforce    = "enforce"
+	valStrict     = "strict"
+)
+
 func TestLoad(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -44,22 +52,22 @@ func TestLoad(t *testing.T) {
 			wantSource: SourceEnv,
 		},
 		{
-			name:       "permissive",
-			env:        "permissive",
+			name:       valPermissive,
+			env:        valPermissive,
 			envSet:     true,
 			wantMode:   mode.Permissive,
 			wantSource: SourceEnv,
 		},
 		{
-			name:       "enforce",
-			env:        "enforce",
+			name:       valEnforce,
+			env:        valEnforce,
 			envSet:     true,
 			wantMode:   mode.Enforce,
 			wantSource: SourceEnv,
 		},
 		{
-			name:       "strict",
-			env:        "strict",
+			name:       valStrict,
+			env:        valStrict,
 			envSet:     true,
 			wantMode:   mode.Strict,
 			wantSource: SourceEnv,

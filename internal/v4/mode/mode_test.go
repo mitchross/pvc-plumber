@@ -5,6 +5,11 @@ import (
 	"testing"
 )
 
+// Test-scope constant for the garbage value used to verify Parse* rejection
+// across multiple subtests. Production code has no equivalent; this is a
+// pure test fixture.
+const testStrGarbage = "garbage"
+
 func TestParseMode(t *testing.T) {
 	cases := []struct {
 		in      string
@@ -12,14 +17,14 @@ func TestParseMode(t *testing.T) {
 		wantErr bool
 	}{
 		{"", Unspecified, false},
-		{"audit", Audit, false},
+		{modeStrAudit, Audit, false},
 		{"Audit", Audit, false},
 		{"PERMISSIVE", Permissive, false},
 		{"  enforce ", Enforce, false},
-		{"strict", Strict, false},
-		{"never", Unspecified, true}, // never is a RestoreMode, not a Mode
-		{"force", Unspecified, true}, // force is a RestoreMode, not a Mode
-		{"garbage", Unspecified, true},
+		{modeStrStrict, Strict, false},
+		{restoreStrNever, Unspecified, true}, // never is a RestoreMode, not a Mode
+		{restoreStrForce, Unspecified, true}, // force is a RestoreMode, not a Mode
+		{testStrGarbage, Unspecified, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -41,14 +46,14 @@ func TestParseRestoreMode(t *testing.T) {
 		wantErr bool
 	}{
 		{"", RestoreUnspecified, false},
-		{"audit", RestoreAudit, false},
-		{"permissive", RestorePermissive, false},
-		{"enforce", RestoreEnforce, false},
-		{"strict", RestoreStrict, false},
-		{"never", RestoreNever, false},
-		{"force", RestoreForce, false},
+		{modeStrAudit, RestoreAudit, false},
+		{modeStrPermissive, RestorePermissive, false},
+		{modeStrEnforce, RestoreEnforce, false},
+		{modeStrStrict, RestoreStrict, false},
+		{restoreStrNever, RestoreNever, false},
+		{restoreStrForce, RestoreForce, false},
 		{"Force", RestoreForce, false},
-		{"garbage", RestoreUnspecified, true},
+		{testStrGarbage, RestoreUnspecified, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -100,8 +105,8 @@ func TestResolve_Precedence(t *testing.T) {
 		{
 			name: "namespace overrides global",
 			in: PrecedenceInputs{
-				NamespaceMode:        "enforce",
-				NamespaceRestoreMode: "never",
+				NamespaceMode:        modeStrEnforce,
+				NamespaceRestoreMode: restoreStrNever,
 				GlobalMode:           Permissive,
 				GlobalRestore:        RestorePermissive,
 				Default:              Audit,
@@ -115,10 +120,10 @@ func TestResolve_Precedence(t *testing.T) {
 		{
 			name: "PVC annotation overrides all",
 			in: PrecedenceInputs{
-				PVCMode:              "strict",
-				PVCRestoreMode:       "force",
-				NamespaceMode:        "enforce",
-				NamespaceRestoreMode: "never",
+				PVCMode:              modeStrStrict,
+				PVCRestoreMode:       restoreStrForce,
+				NamespaceMode:        modeStrEnforce,
+				NamespaceRestoreMode: restoreStrNever,
 				GlobalMode:           Permissive,
 				GlobalRestore:        RestorePermissive,
 				Default:              Audit,
@@ -132,7 +137,7 @@ func TestResolve_Precedence(t *testing.T) {
 		{
 			name: "PVC overrides Mode but not RestoreMode (independent)",
 			in: PrecedenceInputs{
-				PVCMode:        "strict",
+				PVCMode:        modeStrStrict,
 				GlobalMode:     Permissive,
 				GlobalRestore:  RestorePermissive,
 				Default:        Audit,
@@ -146,7 +151,7 @@ func TestResolve_Precedence(t *testing.T) {
 		{
 			name: "malformed PVC mode → falls through, error returned, no crash",
 			in: PrecedenceInputs{
-				PVCMode:    "garbage",
+				PVCMode:    testStrGarbage,
 				GlobalMode: Permissive,
 				Default:    Audit,
 			},
@@ -157,8 +162,8 @@ func TestResolve_Precedence(t *testing.T) {
 		{
 			name: "malformed namespace mode + valid PVC → PVC wins, error returned",
 			in: PrecedenceInputs{
-				PVCMode:       "enforce",
-				NamespaceMode: "garbage",
+				PVCMode:       modeStrEnforce,
+				NamespaceMode: testStrGarbage,
 				GlobalMode:    Permissive,
 				Default:       Audit,
 			},
@@ -230,7 +235,7 @@ func TestModePredicates(t *testing.T) {
 
 func TestMultiError(t *testing.T) {
 	in := PrecedenceInputs{
-		PVCMode:       "garbage",
+		PVCMode:       testStrGarbage,
 		NamespaceMode: "also-garbage",
 		Default:       Audit,
 	}

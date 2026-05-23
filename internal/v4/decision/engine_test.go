@@ -10,6 +10,16 @@ import (
 	"github.com/mitchross/pvc-plumber/internal/v4/naming"
 )
 
+// Test-scope constants — repeated PVC names and event-reason strings.
+const (
+	testPVCData      = "data"
+	testPVCDataDst   = "data-dst"
+	testIdMyappData  = "myapp/data"
+	testPVCLibrary   = "library"
+	testPVCLibraryBk = "library-backup"
+	testEvBackupUnk  = "BackupStateUnknown"
+)
+
 // helper: build the minimal opted-in PVC LabelSpec.
 func optedIn(tier labels.Tier) labels.Spec {
 	return labels.Spec{
@@ -47,7 +57,7 @@ func resolved(m mode.Mode, r mode.RestoreMode) mode.Resolved {
 func baseInput(spec labels.Spec, res mode.Resolved, bs BackupState, cf CacheFreshness) Input {
 	return Input{
 		Namespace:      "myapp",
-		PVCName:        "data",
+		PVCName:        testPVCData,
 		LabelSpec:      spec,
 		Resolved:       res,
 		BackupState:    bs,
@@ -83,7 +93,7 @@ func TestFailureMatrix(t *testing.T) {
 			wantAdmit:   true,
 			wantMutate:  true,
 			wantReason:  ReasonAllowedRestoreInjected,
-			wantDSRName: "data-dst",
+			wantDSRName: testPVCDataDst,
 		},
 
 		// === PRD §10 Case 3: backend unreachable + strict ===
@@ -127,7 +137,7 @@ func TestFailureMatrix(t *testing.T) {
 			wantAdmit:   true,
 			wantMutate:  true,
 			wantReason:  ReasonAllowedRestoreInjected,
-			wantDSRName: "data-dst",
+			wantDSRName: testPVCDataDst,
 		},
 		{
 			name:       "case6b: cache stale + BackupMissing + permissive → allow (fresh) + warn",
@@ -143,7 +153,7 @@ func TestFailureMatrix(t *testing.T) {
 			in: func() Input {
 				i := baseInput(optedIn(labels.TierDaily), resolved(mode.Strict, mode.RestoreStrict), BackupExists, CacheFresh)
 				i.KnownIdentities = []IdentityRef{
-					{Namespace: "other-app", PVCName: "data", Identity: "myapp/data"},
+					{Namespace: "other-app", PVCName: "data", Identity: testIdMyappData},
 				}
 				return i
 			}(),
@@ -156,14 +166,14 @@ func TestFailureMatrix(t *testing.T) {
 			in: func() Input {
 				i := baseInput(optedIn(labels.TierDaily), resolved(mode.Permissive, mode.RestorePermissive), BackupExists, CacheFresh)
 				i.KnownIdentities = []IdentityRef{
-					{Namespace: "other-app", PVCName: "data", Identity: "myapp/data"},
+					{Namespace: "other-app", PVCName: "data", Identity: testIdMyappData},
 				}
 				return i
 			}(),
 			wantAdmit:   true,
 			wantMutate:  true,
 			wantReason:  ReasonAllowedRestoreInjected,
-			wantDSRName: "data-dst",
+			wantDSRName: testPVCDataDst,
 		},
 
 		// === PRD §10 Case 8: skip-restore without reason ===
@@ -222,7 +232,7 @@ func TestFailureMatrix(t *testing.T) {
 			wantAdmit:   true,
 			wantMutate:  true,
 			wantReason:  ReasonAllowedRestoreInjected,
-			wantDSRName: "data-dst",
+			wantDSRName: testPVCDataDst,
 		},
 
 		// === PRD §10 Case 14: restore-mode=force, no backup ===
@@ -354,7 +364,7 @@ func TestFailureMatrix(t *testing.T) {
 			wantAdmit:   true,
 			wantMutate:  true,
 			wantReason:  ReasonAllowedRestoreInjected,
-			wantDSRName: "data-dst",
+			wantDSRName: testPVCDataDst,
 		},
 
 		// === Audit overrides deny verdicts ===
@@ -414,7 +424,7 @@ func TestDecide_IdentityResolution(t *testing.T) {
 func TestDecide_NamesAndDataSourceRef(t *testing.T) {
 	// Bare-dst convention: RS=<pvc>, RD=<pvc>-dst
 	in := baseInput(optedIn(labels.TierDaily), resolved(mode.Enforce, mode.RestoreEnforce), BackupExists, CacheFresh)
-	in.PVCName = "library"
+	in.PVCName = testPVCLibrary
 	out := Decide(in)
 	if out.Names.RS != "library" {
 		t.Errorf("Names.RS: got %q, want %q", out.Names.RS, "library")
@@ -434,16 +444,16 @@ func TestDecide_LegacyNamingStrategy(t *testing.T) {
 	// When the operator is configured with StrategyLegacyBackup (for Phase 6
 	// adoption of v3-operator-era orphans), RS and RD both end in "-backup".
 	in := baseInput(optedIn(labels.TierDaily), resolved(mode.Enforce, mode.RestoreEnforce), BackupExists, CacheFresh)
-	in.PVCName = "library"
+	in.PVCName = testPVCLibrary
 	in.Config.NamingStrategy = naming.StrategyLegacyBackup
 	out := Decide(in)
-	if out.Names.RS != "library-backup" {
+	if out.Names.RS != testPVCLibraryBk {
 		t.Errorf("Names.RS (legacy): got %q, want %q", out.Names.RS, "library-backup")
 	}
-	if out.Names.RD != "library-backup" {
+	if out.Names.RD != testPVCLibraryBk {
 		t.Errorf("Names.RD (legacy): got %q, want %q", out.Names.RD, "library-backup")
 	}
-	if out.DataSourceRef.Name != "library-backup" {
+	if out.DataSourceRef.Name != testPVCLibraryBk {
 		t.Errorf("DataSourceRef.Name (legacy): got %q", out.DataSourceRef.Name)
 	}
 }
@@ -510,7 +520,7 @@ func TestDecide_SelfReferenceNotDuplicate(t *testing.T) {
 	in := baseInput(optedIn(labels.TierDaily), resolved(mode.Strict, mode.RestoreStrict), BackupExists, CacheFresh)
 	// Same namespace + same PVC name in KnownIdentities → must NOT trigger dup.
 	in.KnownIdentities = []IdentityRef{
-		{Namespace: in.Namespace, PVCName: in.PVCName, Identity: "myapp/data"},
+		{Namespace: in.Namespace, PVCName: in.PVCName, Identity: testIdMyappData},
 	}
 	out := Decide(in)
 	if !out.Admit {
