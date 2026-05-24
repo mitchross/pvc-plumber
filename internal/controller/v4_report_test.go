@@ -22,6 +22,8 @@ const (
 	testRepoSecretShare = "volsync-kopia-repository"
 	testNSOpenWebUI     = "open-webui"
 	testPVCStorageName  = "storage"
+	testPVCLibrary      = "library"
+	testIdentityImmich  = "immich-library"
 )
 
 func TestActionKindValues(t *testing.T) {
@@ -254,7 +256,7 @@ func TestSnapshot_Metadata(t *testing.T) {
 	if rep.NamingStrategy != "bare-dst" {
 		t.Errorf("NamingStrategy: got %q, want bare-dst", rep.NamingStrategy)
 	}
-	if rep.DefaultRepoSecret != "volsync-kopia-repository" {
+	if rep.DefaultRepoSecret != testRepoSecretShare {
 		t.Errorf("DefaultRepoSecret: got %q", rep.DefaultRepoSecret)
 	}
 	if !rep.GeneratedAt.Equal(fixedTime()) {
@@ -281,12 +283,12 @@ func TestParityEntry_JSONRoundTrip(t *testing.T) {
 		Current: CurrentState{
 			RSPresent:    true,
 			RSName:       testPVCStorageName,
-			RSManagedBy:  "argocd",
+			RSManagedBy:  ManagedByArgoCDLabelValue,
 			RSRepository: testRepoSecretShare,
 			RSSourcePVC:  testPVCStorageName,
 			RDPresent:    true,
 			RDName:       testPVCStorageName + "-dst",
-			RDManagedBy:  "argocd",
+			RDManagedBy:  ManagedByArgoCDLabelValue,
 			RDRepository: testRepoSecretShare,
 		},
 		Owner:       OwnerInlineArgo,
