@@ -255,6 +255,19 @@ type CurrentState struct {
 	RDRepository string `json:"rd_repository,omitempty"`
 }
 
+// PlannedOpSummary is the audit-surfaced shape of a single planner operation.
+// Carries enough identifying information to prove (in /audit output and in
+// the cutover runbook) that the planner only ever targets VolSync RS/RD,
+// without embedding the full unstructured resource body. Kind matches
+// planner.OpKind ("create" | "update" | "delete"); GVK is the canonical
+// "group/version/Kind" string for the targeted resource.
+type PlannedOpSummary struct {
+	Kind      string `json:"kind"`
+	GVK       string `json:"gvk"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
 // ParityEntry is one row in the audit report — the desired-vs-current
 // view for a single PVC at a single point in time.
 type ParityEntry struct {
@@ -269,6 +282,8 @@ type ParityEntry struct {
 	Owner          OwnerClassification `json:"owner_classification"`
 	Action         ActionKind          `json:"action"`
 	Blockers       []string            `json:"blockers,omitempty"`
+	Notes          []string            `json:"notes,omitempty"`
+	PlannedOps     []PlannedOpSummary  `json:"planned_ops,omitempty"`
 	ReasonCode     string              `json:"reason_code,omitempty"`
 	EvaluatedAt    time.Time           `json:"evaluated_at"`
 }

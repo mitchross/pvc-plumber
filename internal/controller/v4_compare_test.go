@@ -127,7 +127,7 @@ func TestClassifyOwner_PVCPlumberWinsOverArgo(t *testing.T) {
 func TestDecideAction_ExemptValid_OverridesLegacyBackupLabel(t *testing.T) {
 	spec := defaultLegacySpec()
 	spec.ExemptKind = labels.ExemptValid
-	spec.ExemptReason = "NAS-backed, non-snapshottable"
+	spec.ExemptReason = testReasonNASBacked
 
 	got := DecideAction(spec, LabelSourceLegacy, CurrentState{}, defaultExpected(), OwnerNone)
 	if got.Action != ActionSkippedExempt {
