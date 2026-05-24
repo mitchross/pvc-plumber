@@ -142,15 +142,15 @@ func TestV4Reconcile_NotFound_DeletesStoreEntry(t *testing.T) {
 
 	// Pre-seed a stale entry so we can verify it's removed.
 	f.store.Set(ParityEntry{
-		Namespace: "myapp", PVC: testPVCName,
+		Namespace: testNSMyapp, PVC: testPVCName,
 		Action: ActionAlreadyMatches, Owner: OwnerInlineArgo, LabelSource: LabelSourceV4,
 	})
 
-	entry := f.reconcile("myapp", testPVCName)
+	entry := f.reconcile(testNSMyapp, testPVCName)
 	if entry.PVC != "" {
 		t.Errorf("Store entry should have been deleted; got %+v", entry)
 	}
-	if _, ok := f.store.Get("myapp", testPVCName); ok {
+	if _, ok := f.store.Get(testNSMyapp, testPVCName); ok {
 		t.Errorf("Store still has entry after NotFound reconcile")
 	}
 	f.assertNoWrites()
@@ -173,10 +173,10 @@ func TestV4Reconcile_SystemNamespace_Ignored(t *testing.T) {
 // =============================================================================
 
 func TestV4Reconcile_LegacyBackupHourly_NoCurrent_WouldCreate(t *testing.T) {
-	pvc := makePVC("myapp", testPVCName, map[string]string{backupLabelKey: backupHourly}, nil)
+	pvc := makePVC(testNSMyapp, testPVCName, map[string]string{backupLabelKey: backupHourly}, nil)
 	f := newV4Fixture(t, pvc)
 
-	entry := f.reconcile("myapp", testPVCName)
+	entry := f.reconcile(testNSMyapp, testPVCName)
 	if entry.Action != ActionWouldCreate {
 		t.Errorf("legacy backup: hourly + no current: got %q, want %q", entry.Action, ActionWouldCreate)
 	}
@@ -196,10 +196,10 @@ func TestV4Reconcile_LegacyBackupHourly_NoCurrent_WouldCreate(t *testing.T) {
 }
 
 func TestV4Reconcile_LegacyBackupDaily_AcceptedAsOptIn(t *testing.T) {
-	pvc := makePVC("myapp", "config", map[string]string{backupLabelKey: backupDaily}, nil)
+	pvc := makePVC(testNSMyapp, "config", map[string]string{backupLabelKey: backupDaily}, nil)
 	f := newV4Fixture(t, pvc)
 
-	entry := f.reconcile("myapp", "config")
+	entry := f.reconcile(testNSMyapp, "config")
 	if entry.Action == ActionSkippedNotOptedIn {
 		t.Fatalf("backup: daily must not be skipped-not-opted-in; got %q", entry.Action)
 	}
@@ -272,7 +272,7 @@ func TestV4Reconcile_TalosInlinePattern_V4Label_AlreadyMatches(t *testing.T) {
 // =============================================================================
 
 func TestV4Reconcile_V4Label_NoCurrentResources_WouldCreate(t *testing.T) {
-	pvc := makePVC("myapp", testPVCName,
+	pvc := makePVC(testNSMyapp, testPVCName,
 		map[string]string{
 			v4labels.LabelEnabled: labelTrue,
 			v4labels.LabelTier:    backupHourly,
@@ -280,7 +280,7 @@ func TestV4Reconcile_V4Label_NoCurrentResources_WouldCreate(t *testing.T) {
 		nil)
 	f := newV4Fixture(t, pvc)
 
-	entry := f.reconcile("myapp", testPVCName)
+	entry := f.reconcile(testNSMyapp, testPVCName)
 	if entry.Action != ActionWouldCreate {
 		t.Errorf("v4 + no current: got %q, want %q", entry.Action, ActionWouldCreate)
 	}
@@ -303,16 +303,16 @@ func TestV4Reconcile_V4Label_NoCurrentResources_WouldCreate(t *testing.T) {
 // expectation. Verdict: would-create (since OwnerNone — neither chart-era
 // resource matches the bare-dst names we query).
 func TestV4Reconcile_OnlyChartEraNamesPresent_WouldCreate(t *testing.T) {
-	pvc := makePVC("myapp", testPVCName,
+	pvc := makePVC(testNSMyapp, testPVCName,
 		map[string]string{backupLabelKey: backupDaily},
 		nil)
 	// Chart-era shape: same name for both RS and RD ("<pvc>-backup"),
 	// managed-by=pvc-plumber (v3 era), shared repo.
-	chartRS := makeRS("myapp", testPVCName+"-backup", ManagedByPVCPlumberLabelValue, testRepoSecretShare, testPVCName)
-	chartRD := makeRD("myapp", testPVCName+"-backup", ManagedByPVCPlumberLabelValue, testRepoSecretShare)
+	chartRS := makeRS(testNSMyapp, testPVCName+"-backup", ManagedByPVCPlumberLabelValue, testRepoSecretShare, testPVCName)
+	chartRD := makeRD(testNSMyapp, testPVCName+"-backup", ManagedByPVCPlumberLabelValue, testRepoSecretShare)
 
 	f := newV4Fixture(t, pvc, chartRS, chartRD)
-	entry := f.reconcile("myapp", testPVCName)
+	entry := f.reconcile(testNSMyapp, testPVCName)
 
 	if entry.Action == ActionAlreadyMatches {
 		t.Fatalf("chart-era names must NOT count as already-matches; got %q", entry.Action)
@@ -349,7 +349,7 @@ func TestV4Reconcile_BackupExempt_SkippedExempt(t *testing.T) {
 
 // Backup-exempt wins even when legacy backup: label is also present.
 func TestV4Reconcile_BackupExempt_OverridesLegacyBackupLabel(t *testing.T) {
-	pvc := makePVC("myapp", testPVCName,
+	pvc := makePVC(testNSMyapp, testPVCName,
 		map[string]string{
 			backupLabelKey:    backupDaily,
 			backupExemptLabel: labelTrue,
@@ -358,7 +358,7 @@ func TestV4Reconcile_BackupExempt_OverridesLegacyBackupLabel(t *testing.T) {
 	)
 	f := newV4Fixture(t, pvc)
 
-	entry := f.reconcile("myapp", testPVCName)
+	entry := f.reconcile(testNSMyapp, testPVCName)
 	if entry.Action != ActionSkippedExempt {
 		t.Errorf("exempt+legacy: got %q, want %q (exempt must win)", entry.Action, ActionSkippedExempt)
 	}
@@ -370,10 +370,10 @@ func TestV4Reconcile_BackupExempt_OverridesLegacyBackupLabel(t *testing.T) {
 // =============================================================================
 
 func TestV4Reconcile_NoLabels_SkippedNotOptedIn(t *testing.T) {
-	pvc := makePVC("myapp", "config", nil, nil)
+	pvc := makePVC(testNSMyapp, "config", nil, nil)
 	f := newV4Fixture(t, pvc)
 
-	entry := f.reconcile("myapp", "config")
+	entry := f.reconcile(testNSMyapp, "config")
 	if entry.Action != ActionSkippedNotOptedIn {
 		t.Errorf("no labels: got %q, want %q", entry.Action, ActionSkippedNotOptedIn)
 	}
@@ -393,14 +393,14 @@ func TestV4Reconcile_NoLabels_SkippedNotOptedIn(t *testing.T) {
 // This is the typical "v3 reconciler created resources, then schedule
 // formula changed" scenario.
 func TestV4Reconcile_ManagedByPVCPlumber_ShapeDrifts_WouldUpdate(t *testing.T) {
-	pvc := makePVC("myapp", testPVCName,
+	pvc := makePVC(testNSMyapp, testPVCName,
 		map[string]string{v4labels.LabelEnabled: labelTrue},
 		nil)
-	rs := makeRS("myapp", testPVCName, ManagedByPVCPlumberLabelValue, "wrong-repo", testPVCName)
-	rd := makeRD("myapp", testPVCName+"-dst", ManagedByPVCPlumberLabelValue, "wrong-repo")
+	rs := makeRS(testNSMyapp, testPVCName, ManagedByPVCPlumberLabelValue, "wrong-repo", testPVCName)
+	rd := makeRD(testNSMyapp, testPVCName+"-dst", ManagedByPVCPlumberLabelValue, "wrong-repo")
 
 	f := newV4Fixture(t, pvc, rs, rd)
-	entry := f.reconcile("myapp", testPVCName)
+	entry := f.reconcile(testNSMyapp, testPVCName)
 
 	if entry.Action != ActionWouldUpdate {
 		t.Errorf("pvc-plumber drift: got %q, want %q", entry.Action, ActionWouldUpdate)
@@ -415,14 +415,14 @@ func TestV4Reconcile_ManagedByPVCPlumber_ShapeDrifts_WouldUpdate(t *testing.T) {
 // should be inline-argo-observed (NOT would-update — operator must not
 // touch GitOps-owned resources, NOT would-delete because owner is argocd).
 func TestV4Reconcile_InlineArgoDrift_InlineArgoObserved_NotWouldDelete(t *testing.T) {
-	pvc := makePVC("myapp", testPVCName,
+	pvc := makePVC(testNSMyapp, testPVCName,
 		map[string]string{v4labels.LabelEnabled: labelTrue},
 		nil)
-	rs := makeRS("myapp", testPVCName, ManagedByArgoCDLabelValue, "drifted-repo", testPVCName)
-	rd := makeRD("myapp", testPVCName+"-dst", ManagedByArgoCDLabelValue, "drifted-repo")
+	rs := makeRS(testNSMyapp, testPVCName, ManagedByArgoCDLabelValue, "drifted-repo", testPVCName)
+	rd := makeRD(testNSMyapp, testPVCName+"-dst", ManagedByArgoCDLabelValue, "drifted-repo")
 
 	f := newV4Fixture(t, pvc, rs, rd)
-	entry := f.reconcile("myapp", testPVCName)
+	entry := f.reconcile(testNSMyapp, testPVCName)
 
 	if entry.Action == ActionWouldDelete {
 		t.Fatalf("inline-argo must never be would-delete; got %q", entry.Action)
@@ -441,14 +441,14 @@ func TestV4Reconcile_InlineArgoDrift_InlineArgoObserved_NotWouldDelete(t *testin
 // catch-all classification for GitOps paths that don't carry
 // managed-by; the reconciler treats them as observed, never delete.
 func TestV4Reconcile_UnmanagedShapeMatches_AlreadyMatches(t *testing.T) {
-	pvc := makePVC("myapp", testPVCName,
+	pvc := makePVC(testNSMyapp, testPVCName,
 		map[string]string{v4labels.LabelEnabled: labelTrue},
 		nil)
-	rs := makeRS("myapp", testPVCName, "", testRepoSecretShare, testPVCName)
-	rd := makeRD("myapp", testPVCName+"-dst", "", testRepoSecretShare)
+	rs := makeRS(testNSMyapp, testPVCName, "", testRepoSecretShare, testPVCName)
+	rd := makeRD(testNSMyapp, testPVCName+"-dst", "", testRepoSecretShare)
 
 	f := newV4Fixture(t, pvc, rs, rd)
-	entry := f.reconcile("myapp", testPVCName)
+	entry := f.reconcile(testNSMyapp, testPVCName)
 
 	if entry.Action != ActionAlreadyMatches {
 		t.Errorf("unmanaged matching shape: got %q, want %q", entry.Action, ActionAlreadyMatches)
@@ -518,12 +518,12 @@ func TestV4Reconcile_StoreUpdatedAcrossMultipleReconciles(t *testing.T) {
 // would.
 func TestV4Reconcile_NeverWrites_AcrossAllScenarios(t *testing.T) {
 	pvcs := []client.Object{
-		makePVC("myapp", testPVCName, map[string]string{backupLabelKey: backupHourly}, nil),
-		makePVC("myapp", "config", map[string]string{backupLabelKey: backupDaily}, nil),
-		makePVC("myapp", "exempt-pvc",
+		makePVC(testNSMyapp, testPVCName, map[string]string{backupLabelKey: backupHourly}, nil),
+		makePVC(testNSMyapp, "config", map[string]string{backupLabelKey: backupDaily}, nil),
+		makePVC(testNSMyapp, "exempt-pvc",
 			map[string]string{backupExemptLabel: labelTrue},
 			map[string]string{v4labels.LegacyAnnotationBackupExemptReasonFQ: "NAS"}),
-		makePVC("myapp", "no-label", nil, nil),
+		makePVC(testNSMyapp, "no-label", nil, nil),
 		makePVC("kube-system", "system-pvc", map[string]string{backupLabelKey: backupDaily}, nil),
 		makePVC(testNSOpenWebUI, testPVCStorageName,
 			map[string]string{backupLabelKey: backupDaily}, nil),
@@ -531,13 +531,13 @@ func TestV4Reconcile_NeverWrites_AcrossAllScenarios(t *testing.T) {
 		makeRD(testNSOpenWebUI, testPVCStorageName+"-dst", ManagedByArgoCDLabelValue, testRepoSecretShare),
 	}
 	f := newV4Fixture(t, pvcs...)
-	f.reconcile("myapp", testPVCName)
-	f.reconcile("myapp", "config")
-	f.reconcile("myapp", "exempt-pvc")
-	f.reconcile("myapp", "no-label")
+	f.reconcile(testNSMyapp, testPVCName)
+	f.reconcile(testNSMyapp, "config")
+	f.reconcile(testNSMyapp, "exempt-pvc")
+	f.reconcile(testNSMyapp, "no-label")
 	f.reconcile("kube-system", "system-pvc")
 	f.reconcile(testNSOpenWebUI, testPVCStorageName)
-	f.reconcile("myapp", "vanished-pvc") // NotFound path
+	f.reconcile(testNSMyapp, "vanished-pvc") // NotFound path
 
 	f.assertNoWrites()
 
@@ -555,10 +555,10 @@ func TestV4Reconcile_NeverWrites_AcrossAllScenarios(t *testing.T) {
 // =============================================================================
 
 func TestV4Reconcile_StoreMetadata_PropagatesThroughEntry(t *testing.T) {
-	pvc := makePVC("myapp", testPVCName, map[string]string{backupLabelKey: backupHourly}, nil)
+	pvc := makePVC(testNSMyapp, testPVCName, map[string]string{backupLabelKey: backupHourly}, nil)
 	f := newV4Fixture(t, pvc)
 
-	entry := f.reconcile("myapp", testPVCName)
+	entry := f.reconcile(testNSMyapp, testPVCName)
 
 	if entry.Mode != testModeAudit {
 		t.Errorf("Mode: got %q, want %q", entry.Mode, testModeAudit)

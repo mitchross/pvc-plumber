@@ -72,6 +72,43 @@ const (
 	// operator can see "did I miss labeling this PVC?") but no action.
 	ActionSkippedNotOptedIn ActionKind = "skipped-not-opted-in"
 
+	// ActionWriteGateMissing: the PVC IS visible to v4 (the operator
+	// can see / protect / report it), but it is NOT write-eligible.
+	// Two situations land here:
+	//
+	//   1. pvc-plumber.io/enabled="true" is set but
+	//      pvc-plumber.io/manage-volsync="true" is missing or "false".
+	//      The operator may report on the PVC but the explicit write
+	//      fuse is off, so create/update/delete are not planned.
+	//
+	//   2. Only the legacy `backup: hourly|daily` label is set.
+	//      Legacy alone is an audit/reporting opt-in but never a
+	//      write opt-in — to make this PVC write-eligible an operator
+	//      must add both pvc-plumber.io/enabled=true AND
+	//      pvc-plumber.io/manage-volsync=true.
+	//
+	// Distinct from ActionSkippedNotOptedIn: the PVC IS opted in to
+	// v4 reporting (label_source is v4 or legacy). It is just not
+	// write-eligible.
+	//
+	// Distinct from ActionAlreadyMatches: emitted only when the
+	// operator would OTHERWISE plan a write (create / update /
+	// delete). If existing inline RS/RD already match the expected
+	// shape, the verdict stays ActionAlreadyMatches and a note in
+	// Blockers (or future Notes) records that writes are gated off.
+	//
+	// Distinct from ActionSkippedExempt: backup-exempt wins over
+	// everything and short-circuits before the write gate is
+	// evaluated. A PVC with both `backup-exempt: "true"` and
+	// `pvc-plumber.io/manage-volsync: "true"` lands in
+	// ActionSkippedExempt, not here.
+	//
+	// Emitted by the v4 planner (Patch 6.4). DecideAction does NOT
+	// emit this in Patch 6.2 — only the ActionKind type + summary
+	// bucket plumbing land in 6.2 so the planner can rely on the
+	// constant in 6.4.
+	ActionWriteGateMissing ActionKind = "write-gate-missing"
+
 	// ActionNeedsHumanReview: the PVC has an opt-in signal but its
 	// configuration is malformed (bad tier, bad UID/GID, exempt without
 	// FQ reason, skip-restore without reason, etc.). The audit
@@ -93,6 +130,7 @@ func AllActionKinds() []ActionKind {
 		ActionWouldCreate,
 		ActionWouldDelete,
 		ActionWouldUpdate,
+		ActionWriteGateMissing,
 	}
 }
 
@@ -378,7 +416,7 @@ func (s *Store) Snapshot() ParityReport {
 }
 
 func zeroActionMap() map[ActionKind]int {
-	out := make(map[ActionKind]int, 9)
+	out := make(map[ActionKind]int, 10)
 	for _, k := range AllActionKinds() {
 		out[k] = 0
 	}

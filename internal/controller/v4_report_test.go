@@ -21,6 +21,7 @@ const (
 	testModeAudit       = "audit"
 	testRepoSecretShare = "volsync-kopia-repository"
 	testNSOpenWebUI     = "open-webui"
+	testNSMyapp         = "myapp"
 	testPVCStorageName  = "storage"
 	testPVCLibrary      = "library"
 	testIdentityImmich  = "immich-library"
@@ -37,6 +38,7 @@ func TestActionKindValues(t *testing.T) {
 		ActionSkippedExempt:      "skipped-exempt",
 		ActionSkippedNotOptedIn:  "skipped-not-opted-in",
 		ActionNeedsHumanReview:   "needs-human-review",
+		ActionWriteGateMissing:   actionWriteGateMissingStr,
 	}
 	for k, s := range want {
 		if string(k) != s {
@@ -54,6 +56,106 @@ func TestActionKindValues(t *testing.T) {
 	}
 	if len(seen) != len(want) {
 		t.Errorf("AllActionKinds returned %d items, expected %d", len(seen), len(want))
+	}
+}
+
+// actionWriteGateMissingStr is the canonical wire string for
+// ActionWriteGateMissing. Defined once at test scope so the
+// TestActionKind_WriteGateMissing_String guard, the enum-coverage
+// test, and the round-trip test all reference the same literal — a
+// drift between the constant and the wire-format JSON would otherwise
+// be a silent contract break.
+const actionWriteGateMissingStr = "write-gate-missing"
+
+// TestActionKind_WriteGateMissing_String pins the exact JSON wire
+// string for the Patch 6.2 verdict. The name is the dashed,
+// lower-case form `write-gate-missing` — NOT snake_case, NOT
+// camelCase. Operators reading the /audit JSON depend on this
+// literal, and dashboards / Prometheus joins / Slack alerts will
+// pin against it once the planner starts emitting it (Patch 6.4).
+func TestActionKind_WriteGateMissing_String(t *testing.T) {
+	if got := string(ActionWriteGateMissing); got != actionWriteGateMissingStr {
+		t.Errorf("ActionWriteGateMissing string: got %q, want %q", got, actionWriteGateMissingStr)
+	}
+}
+
+// TestAllActionKinds_IncludesWriteGateMissingOnce proves the new
+// ActionKind appears in AllActionKinds() — without it, the v4
+// audit Snapshot would not seed the zero-count bucket for the
+// new verdict and JSON consumers would see the taxonomy regress
+// when no PVC currently lands in the bucket. The "exactly once"
+// guard catches accidental double-insert in future refactors of
+// AllActionKinds.
+func TestAllActionKinds_IncludesWriteGateMissingOnce(t *testing.T) {
+	count := 0
+	for _, k := range AllActionKinds() {
+		if k == ActionWriteGateMissing {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("AllActionKinds() entries for ActionWriteGateMissing: got %d, want 1", count)
+	}
+}
+
+// TestStoreSnapshot_SummaryIncludesWriteGateMissingBucket proves
+// that an empty Store.Snapshot() still surfaces the zero bucket for
+// the new verdict. Full-taxonomy coverage is part of the /audit
+// contract: operators iterating the JSON should always see every
+// defined ActionKind, even when no PVC currently lands in it.
+func TestStoreSnapshot_SummaryIncludesWriteGateMissingBucket(t *testing.T) {
+	s := NewStore(testModeAudit, "bare-dst", testRepoSecretShare)
+	s.now = fixedTime
+	rep := s.Snapshot()
+
+	got, ok := rep.Summary.ByAction[ActionWriteGateMissing]
+	if !ok {
+		t.Fatalf("Snapshot.Summary.ByAction missing bucket %q", actionWriteGateMissingStr)
+	}
+	if got != 0 {
+		t.Errorf("Snapshot.Summary.ByAction[%q]: got %d, want 0 (empty Store)", actionWriteGateMissingStr, got)
+	}
+}
+
+// TestParityEntry_JSONRoundTrip_WriteGateMissing proves the new
+// verdict survives a json.Marshal → json.Unmarshal round trip
+// without losing its wire representation. Belt-and-braces on top
+// of TestActionKind_WriteGateMissing_String: if a future
+// MarshalJSON / UnmarshalJSON hook on ActionKind ever shows up,
+// this test ensures the wire format stays "write-gate-missing"
+// rather than the Go identifier.
+func TestParityEntry_JSONRoundTrip_WriteGateMissing(t *testing.T) {
+	original := ParityEntry{
+		Namespace:   testNSMyapp,
+		PVC:         testPVCName,
+		Mode:        testModeAudit,
+		Tier:        backupHourly,
+		LabelSource: LabelSourceV4,
+		Owner:       OwnerNone,
+		Action:      ActionWriteGateMissing,
+		Blockers:    []string{"missing pvc-plumber.io/manage-volsync label"},
+	}
+
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	// Wire string check before decoding — catches any future
+	// MarshalJSON drift that would silently rename the verdict.
+	if !strings.Contains(string(raw), `"action":"`+actionWriteGateMissingStr+`"`) {
+		t.Errorf("marshaled JSON missing %q in action field; body=%s", actionWriteGateMissingStr, string(raw))
+	}
+
+	var decoded ParityEntry
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if decoded.Action != ActionWriteGateMissing {
+		t.Errorf("Action after round-trip: got %q, want %q", decoded.Action, ActionWriteGateMissing)
+	}
+	if len(decoded.Blockers) != 1 || decoded.Blockers[0] != "missing pvc-plumber.io/manage-volsync label" {
+		t.Errorf("Blockers after round-trip: got %v", decoded.Blockers)
 	}
 }
 
@@ -101,7 +203,7 @@ func TestStore_BasicSetGetDeleteLen(t *testing.T) {
 	}
 
 	e := ParityEntry{
-		Namespace:   "myapp",
+		Namespace:   testNSMyapp,
 		PVC:         testPVCName,
 		Mode:        testModeAudit,
 		Tier:        backupDaily,
@@ -115,7 +217,7 @@ func TestStore_BasicSetGetDeleteLen(t *testing.T) {
 		t.Errorf("Len after Set: got %d, want 1", got)
 	}
 
-	got, ok := s.Get("myapp", "data")
+	got, ok := s.Get(testNSMyapp, "data")
 	if !ok {
 		t.Fatalf("Get returned ok=false for present entry")
 	}
@@ -129,7 +231,7 @@ func TestStore_BasicSetGetDeleteLen(t *testing.T) {
 	// Replace
 	e.Tier = backupHourly
 	s.Set(e)
-	got, _ = s.Get("myapp", "data")
+	got, _ = s.Get(testNSMyapp, "data")
 	if got.Tier != backupHourly {
 		t.Errorf("Set replace: tier=%q, want %q", got.Tier, "hourly")
 	}
@@ -137,8 +239,8 @@ func TestStore_BasicSetGetDeleteLen(t *testing.T) {
 		t.Errorf("Len after replace: got %d, want 1", got)
 	}
 
-	s.Delete("myapp", "data")
-	if _, ok := s.Get("myapp", "data"); ok {
+	s.Delete(testNSMyapp, "data")
+	if _, ok := s.Get(testNSMyapp, "data"); ok {
 		t.Errorf("Get after Delete: still present")
 	}
 	if got := s.Len(); got != 0 {
@@ -146,7 +248,7 @@ func TestStore_BasicSetGetDeleteLen(t *testing.T) {
 	}
 
 	// Delete absent → no error / no panic
-	s.Delete("myapp", "nonexistent")
+	s.Delete(testNSMyapp, "nonexistent")
 }
 
 func TestStore_PreservesExplicitEvaluatedAt(t *testing.T) {
