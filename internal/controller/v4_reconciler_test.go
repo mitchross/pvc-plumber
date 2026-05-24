@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -37,12 +38,22 @@ type v4Fixture struct {
 
 func newV4Fixture(t *testing.T, seedObjs ...client.Object) *v4Fixture {
 	t.Helper()
+	return newV4ModeFixture(t, mode.Audit, seedObjs...)
+}
+
+// newV4ModeFixture is the shared fixture builder for both audit and
+// non-audit modes. The reconciler's Mode field plus the auditclient's
+// own Mode are both threaded from the parameter so the executor's
+// short-circuit path (audit) or write path (permissive/enforce/strict)
+// is exercised consistently.
+func newV4ModeFixture(t *testing.T, m mode.Mode, seedObjs ...client.Object) *v4Fixture {
+	t.Helper()
 	scheme := newTestScheme(t)
 	fakeC := fake.NewClientBuilder().WithScheme(scheme).WithObjects(seedObjs...).Build()
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
-	auditC := auditclient.New(fakeC, mode.Audit, log)
-	store := NewStore(testModeAudit, "bare-dst", testRepoSecretShare)
+	auditC := auditclient.New(fakeC, m, log)
+	store := NewStore(m.String(), "bare-dst", testRepoSecretShare)
 	store.now = fixedTime
 	r := &V4AuditReconciler{
 		Client:            auditC,
@@ -50,7 +61,8 @@ func newV4Fixture(t *testing.T, seedObjs ...client.Object) *v4Fixture {
 		NamingStrategy:    naming.StrategyBareDst,
 		DefaultRepoSecret: testRepoSecretShare,
 		SystemNamespaces:  map[string]struct{}{"kube-system": {}, "volsync-system": {}, "argocd": {}},
-		OperatorMode:      testModeAudit,
+		OperatorMode:      m.String(),
+		Mode:              m,
 		Now:               fixedTime,
 	}
 	return &v4Fixture{t: t, fake: fakeC, audit: auditC, store: store, rec: r, logBuf: &buf}
@@ -670,7 +682,10 @@ func labelsEnabledManage() map[string]string {
 }
 
 // labelsEnabledManageTier returns enabled + manage-volsync with a custom
-// tier value. Used by the tier=disabled case.
+// tier value. Used by the tier=disabled cases today; parametric on
+// purpose for upcoming hourly/daily/custom-tier scenarios.
+//
+//nolint:unparam // both current callers pass "disabled"; future tier cases will diverge
 func labelsEnabledManageTier(tier string) map[string]string {
 	return map[string]string{
 		v4labels.LabelEnabled:       labelTrue,
@@ -1018,4 +1033,563 @@ func TestV4Reconcile_Patch65_NoForeignKindsEverPlanned(t *testing.T) {
 
 	assertPlannedOpsTargetVolSyncOnly(t, f.store)
 	f.assertNoWrites()
+}
+
+// =============================================================================
+// Patch 6.7: executor wired into the reconciler
+// =============================================================================
+//
+// These tests exercise the executor invocation site added in Patch 6.7.
+// The shared fixture builder (newV4ModeFixture) threads a mode.Mode into
+// both the auditclient wrapper AND the reconciler's Mode field so audit
+// vs permissive flows are exercised exactly the way the production
+// binary will (once 6.7-wire lands).
+//
+// What this block proves:
+//
+//   1. Audit-mode reconciler still produces zero writes (regression
+//      cover for the existing 13-case audit grid).
+//
+//   2. Audit-mode entries with PlannedOps surface an ExecutionResult
+//      with Counts.Skipped == len(plan.Ops); audit-mode entries with no
+//      planned ops leave ExecutionResult nil (no /audit noise).
+//
+//   3. Permissive-mode actually creates / updates / deletes the planner
+//      ops via the embedded client. The fake client is read back to
+//      confirm cluster state matches.
+//
+//   4. Permissive-mode never touches inline-Argo resources (executor's
+//      ownership re-check fires when the planner has — incorrectly —
+//      not pre-filtered, AND when planner correctly returns
+//      inline-argo-observed with empty Ops the executor records nothing).
+//
+//   5. backup-exempt / no-op-in / write-gate cases produce zero writes
+//      under permissive — the planner's empty Ops slice is the gate, not
+//      the executor's mode short-circuit.
+//
+//   6. Enforce + Strict produce identical executor outcomes to
+//      Permissive for the same fixture; webhook/admission divergence
+//      is Phase 8, not 6.7.
+//
+//   7. Cross-mode paranoia walk: every ExecutionResult.Outcomes entry
+//      across every permissive scenario targets only RS or RD GVKs;
+//      no Secret/PVC/ExternalSecret/webhook ever appears.
+//
+// Note on the v3 isolation property: Patch 6.7 does NOT change main.go,
+// so production permissive traffic still hits the v3 PVCReconciler.
+// These tests prove the v4 reconciler + executor pair would behave
+// correctly if main.go were route-flipped today — that's the load-
+// bearing precondition for the 6.7-wire sub-patch.
+
+// assertDidWriteByVerb fails the test if the auditclient's "did" counters
+// don't match the requested verb totals exactly. Used to lock down
+// permissive-mode write volume by verb.
+func (f *v4Fixture) assertDidWriteByVerb(t *testing.T, wantCreate, wantUpdate, wantDelete int64) {
+	t.Helper()
+	d := f.audit.DidWriteTotals()
+	if d.Create != wantCreate {
+		t.Errorf("DidWrite.Create: got %d, want %d", d.Create, wantCreate)
+	}
+	if d.Update != wantUpdate {
+		t.Errorf("DidWrite.Update: got %d, want %d", d.Update, wantUpdate)
+	}
+	if d.Delete != wantDelete {
+		t.Errorf("DidWrite.Delete: got %d, want %d", d.Delete, wantDelete)
+	}
+	if d.Patch != 0 {
+		t.Errorf("DidWrite.Patch: got %d, want 0 (executor never uses Patch)", d.Patch)
+	}
+	if d.DeleteAllOf != 0 {
+		t.Errorf("DidWrite.DeleteAllOf: got %d, want 0", d.DeleteAllOf)
+	}
+}
+
+// liveExists reports whether the underlying fake client holds a resource
+// of the given GVK + name in the namespace. Direct read of f.fake, not
+// the auditclient — we want to see actual cluster state, not the
+// wrapper's view.
+func (f *v4Fixture) liveExists(gvk schema.GroupVersionKind, ns, name string) bool {
+	f.t.Helper()
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(gvk)
+	err := f.fake.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: name}, live)
+	return err == nil
+}
+
+// liveRepo reads spec.kopia.repository from a live RS or RD. Returns ""
+// for not-found / not-set. Used by update tests to verify the executor
+// actually overwrote the drifted value.
+func (f *v4Fixture) liveRepo(gvk schema.GroupVersionKind, ns, name string) string {
+	f.t.Helper()
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(gvk)
+	if err := f.fake.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: name}, live); err != nil {
+		return ""
+	}
+	v, _, _ := unstructured.NestedString(live.Object, "spec", "kopia", "repository")
+	return v
+}
+
+// =============================================================================
+// 6.7 — Audit-mode ExecutionResult shape
+// =============================================================================
+
+// Case A: audit + planned ops → ExecutionResult populated with Counts.Skipped
+// == len(plan.Ops); every outcome carries Status="skipped" and Reason
+// mentioning audit; outcomes only target RS/RD GVKs.
+func TestV4Reconcile_Patch67_AuditWithPlannedOps_ExecutionResultSkipped(t *testing.T) {
+	pvc := makePVC(testNSMyapp, "fresh-pvc", labelsEnabledManage(), nil)
+	f := newV4Fixture(t, pvc)
+	entry := f.reconcile(testNSMyapp, "fresh-pvc")
+
+	if entry.Action != ActionWouldCreate {
+		t.Fatalf("Action: got %q, want %q", entry.Action, ActionWouldCreate)
+	}
+	if len(entry.PlannedOps) != 2 {
+		t.Fatalf("PlannedOps: got %d, want 2", len(entry.PlannedOps))
+	}
+	if entry.ExecutionResult == nil {
+		t.Fatal("ExecutionResult: got nil, want non-nil (planner emitted 2 ops in audit mode)")
+	}
+	if got := entry.ExecutionResult.Counts.Skipped; got != 2 {
+		t.Errorf("ExecutionResult.Counts.Skipped: got %d, want 2", got)
+	}
+	if got := entry.ExecutionResult.Counts.Succeeded; got != 0 {
+		t.Errorf("ExecutionResult.Counts.Succeeded: got %d, want 0 in audit mode", got)
+	}
+	if got := entry.ExecutionResult.Counts.Failed; got != 0 {
+		t.Errorf("ExecutionResult.Counts.Failed: got %d, want 0", got)
+	}
+	if got := len(entry.ExecutionResult.Outcomes); got != 2 {
+		t.Fatalf("ExecutionResult.Outcomes: got %d, want 2", got)
+	}
+	for _, out := range entry.ExecutionResult.Outcomes {
+		if out.Status != "skipped" {
+			t.Errorf("Outcome.Status: got %q, want skipped", out.Status)
+		}
+		if out.GVK != rsGVKStr && out.GVK != rdGVKStr {
+			t.Errorf("Outcome.GVK: got %q, want RS or RD", out.GVK)
+		}
+	}
+	// Zero-write proof: even though ExecutionResult shows planned ops,
+	// no apiserver writes happened.
+	f.assertNoWrites()
+	// Permissive paranoia: the fake client never gained any new RS/RD.
+	if f.liveExists(rsGVK, testNSMyapp, "fresh-pvc") {
+		t.Error("RS exists in cluster after audit reconcile; audit must not write")
+	}
+	if f.liveExists(rdGVK, testNSMyapp, "fresh-pvc-dst") {
+		t.Error("RD exists in cluster after audit reconcile; audit must not write")
+	}
+}
+
+// Case B: audit + no planned ops → ExecutionResult nil (skimmable /audit).
+func TestV4Reconcile_Patch67_AuditWithoutPlannedOps_ExecutionResultNil(t *testing.T) {
+	cases := []struct {
+		name string
+		pvc  *corev1.PersistentVolumeClaim
+		want ActionKind
+	}{
+		{
+			"matches_inline_argo",
+			makePVC(testNSOpenWebUI, testPVCStorageName,
+				map[string]string{backupLabelKey: backupDaily}, nil),
+			ActionAlreadyMatches,
+		},
+		{
+			"skipped-not-opted-in",
+			makePVC(testNSMyapp, "no-labels", nil, nil),
+			ActionSkippedNotOptedIn,
+		},
+		{
+			"skipped-exempt",
+			makePVC(testNSMyapp, "exempt", map[string]string{
+				backupExemptLabel: labelTrue,
+			}, map[string]string{
+				v4labels.LegacyAnnotationBackupExemptReasonFQ: testReasonNASShort,
+			}),
+			ActionSkippedExempt,
+		},
+		{
+			"write-gate-missing-legacy",
+			makePVC(testNSMyapp, "legacy-only",
+				map[string]string{backupLabelKey: backupHourly}, nil),
+			ActionWriteGateMissing,
+		},
+		{
+			"write-gate-missing-enabled-only",
+			makePVC(testNSMyapp, "enabled-only", map[string]string{
+				v4labels.LabelEnabled: labelTrue,
+				v4labels.LabelTier:    backupDaily,
+			}, nil),
+			ActionWriteGateMissing,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := []client.Object{tc.pvc}
+			if tc.name == "matches_inline_argo" {
+				objs = append(objs,
+					makeRS(testNSOpenWebUI, testPVCStorageName, ManagedByArgoCDLabelValue, testRepoSecretShare, testPVCStorageName),
+					makeRD(testNSOpenWebUI, testPVCStorageName+"-dst", ManagedByArgoCDLabelValue, testRepoSecretShare),
+				)
+			}
+			f := newV4Fixture(t, objs...)
+			entry := f.reconcile(tc.pvc.Namespace, tc.pvc.Name)
+			if entry.Action != tc.want {
+				t.Errorf("Action: got %q, want %q", entry.Action, tc.want)
+			}
+			if len(entry.PlannedOps) != 0 {
+				t.Errorf("PlannedOps: got %d, want 0", len(entry.PlannedOps))
+			}
+			if entry.ExecutionResult != nil {
+				t.Errorf("ExecutionResult: got %+v, want nil (no planned ops → no execution_result in /audit)", entry.ExecutionResult)
+			}
+			f.assertNoWrites()
+		})
+	}
+}
+
+// =============================================================================
+// 6.7 — Permissive-mode write paths
+// =============================================================================
+
+// Permissive: enabled + manage with no current RS/RD → executor creates
+// both. Cluster ends up with the v4-named resources, both managed-by=
+// pvc-plumber, both repository=shared. /audit ExecutionResult shows
+// Counts.Succeeded=2.
+func TestV4Reconcile_Patch67_PermissiveEnabledAndManageNoCurrent_CreatesRSRD(t *testing.T) {
+	pvc := makePVC(testNSMyapp, "perm-fresh", labelsEnabledManage(), nil)
+	f := newV4ModeFixture(t, mode.Permissive, pvc)
+	entry := f.reconcile(testNSMyapp, "perm-fresh")
+
+	if entry.Action != ActionWouldCreate {
+		t.Fatalf("Action: got %q, want %q", entry.Action, ActionWouldCreate)
+	}
+	if entry.ExecutionResult == nil {
+		t.Fatal("ExecutionResult: got nil, want non-nil")
+	}
+	if got := entry.ExecutionResult.Counts.Succeeded; got != 2 {
+		t.Errorf("Counts.Succeeded: got %d, want 2", got)
+	}
+	if got := entry.ExecutionResult.Counts.Skipped; got != 0 {
+		t.Errorf("Counts.Skipped: got %d, want 0 (permissive does not short-circuit)", got)
+	}
+	if !f.liveExists(rsGVK, testNSMyapp, "perm-fresh") {
+		t.Error("RS missing after permissive reconcile; executor should have created it")
+	}
+	if !f.liveExists(rdGVK, testNSMyapp, "perm-fresh-dst") {
+		t.Error("RD missing after permissive reconcile; executor should have created it")
+	}
+	f.assertDidWriteByVerb(t, 2, 0, 0)
+}
+
+// Permissive: operator-owned drift (managed-by=pvc-plumber but wrong repo)
+// → executor reads live, verifies ownership, overwrites with the planner's
+// desired body. Repository field on both RS and RD now reflects the
+// operator default.
+func TestV4Reconcile_Patch67_PermissiveOperatorOwnedDrift_UpdatesRSRD(t *testing.T) {
+	pvc := makePVC(testNSMyapp, "perm-drift", labelsEnabledManage(), nil)
+	rs := makeRS(testNSMyapp, "perm-drift", ManagedByPVCPlumberLabelValue, "stale-repo", "perm-drift")
+	rd := makeRD(testNSMyapp, "perm-drift-dst", ManagedByPVCPlumberLabelValue, "stale-repo")
+	f := newV4ModeFixture(t, mode.Permissive, pvc, rs, rd)
+
+	entry := f.reconcile(testNSMyapp, "perm-drift")
+
+	if entry.Action != ActionWouldUpdate {
+		t.Fatalf("Action: got %q, want %q", entry.Action, ActionWouldUpdate)
+	}
+	if entry.ExecutionResult == nil {
+		t.Fatal("ExecutionResult: got nil, want non-nil")
+	}
+	if got := entry.ExecutionResult.Counts.Succeeded; got != 2 {
+		t.Errorf("Counts.Succeeded: got %d, want 2", got)
+	}
+	if got := f.liveRepo(rsGVK, testNSMyapp, "perm-drift"); got != testRepoSecretShare {
+		t.Errorf("RS live repository after update: got %q, want %q", got, testRepoSecretShare)
+	}
+	if got := f.liveRepo(rdGVK, testNSMyapp, "perm-drift-dst"); got != testRepoSecretShare {
+		t.Errorf("RD live repository after update: got %q, want %q", got, testRepoSecretShare)
+	}
+	f.assertDidWriteByVerb(t, 0, 2, 0)
+}
+
+// Permissive: inline-Argo drift (managed-by=argocd, drifted repo) →
+// planner returns ActionInlineArgoObserved with empty Ops; the executor
+// gets nothing to do. Cluster state is unchanged; auditclient counters
+// stay at zero. This is the most important non-write case under
+// permissive mode — the operator MUST NOT touch GitOps-owned resources
+// even when the write fuse is on globally.
+func TestV4Reconcile_Patch67_PermissiveInlineArgoDrift_NoWrites(t *testing.T) {
+	pvc := makePVC(testNSMyapp, "perm-argo", labelsEnabledManage(), nil)
+	rs := makeRS(testNSMyapp, "perm-argo", ManagedByArgoCDLabelValue, "argo-repo", "perm-argo")
+	rd := makeRD(testNSMyapp, "perm-argo-dst", ManagedByArgoCDLabelValue, "argo-repo")
+	f := newV4ModeFixture(t, mode.Permissive, pvc, rs, rd)
+
+	entry := f.reconcile(testNSMyapp, "perm-argo")
+
+	if entry.Action != ActionInlineArgoObserved {
+		t.Fatalf("Action: got %q, want %q", entry.Action, ActionInlineArgoObserved)
+	}
+	if len(entry.PlannedOps) != 0 {
+		t.Errorf("PlannedOps: got %d, want 0 (never touch inline-argo)", len(entry.PlannedOps))
+	}
+	if entry.ExecutionResult != nil {
+		t.Errorf("ExecutionResult: got %+v, want nil (no planned ops)", entry.ExecutionResult)
+	}
+	// Live state must be unchanged — Argo-owned drift stays.
+	if got := f.liveRepo(rsGVK, testNSMyapp, "perm-argo"); got != "argo-repo" {
+		t.Errorf("RS live repository after no-op reconcile: got %q, want %q (must not have been overwritten)", got, "argo-repo")
+	}
+	f.assertDidWriteByVerb(t, 0, 0, 0)
+}
+
+// Permissive: tier=disabled + operator-owned RS/RD → planner emits 2
+// deletes; executor reads live, verifies ownership, deletes. Cluster
+// state: both RS and RD gone.
+func TestV4Reconcile_Patch67_PermissiveTierDisabledOperatorOwned_DeletesRSRD(t *testing.T) {
+	pvc := makePVC(testNSMyapp, "perm-disable", labelsEnabledManageTier("disabled"), nil)
+	rs := makeRS(testNSMyapp, "perm-disable", ManagedByPVCPlumberLabelValue, testRepoSecretShare, "perm-disable")
+	rd := makeRD(testNSMyapp, "perm-disable-dst", ManagedByPVCPlumberLabelValue, testRepoSecretShare)
+	f := newV4ModeFixture(t, mode.Permissive, pvc, rs, rd)
+
+	entry := f.reconcile(testNSMyapp, "perm-disable")
+
+	if entry.Action != ActionWouldDelete {
+		t.Fatalf("Action: got %q, want %q", entry.Action, ActionWouldDelete)
+	}
+	if entry.ExecutionResult == nil {
+		t.Fatal("ExecutionResult: got nil, want non-nil")
+	}
+	if got := entry.ExecutionResult.Counts.Succeeded; got != 2 {
+		t.Errorf("Counts.Succeeded: got %d, want 2", got)
+	}
+	if f.liveExists(rsGVK, testNSMyapp, "perm-disable") {
+		t.Error("RS still in cluster after permissive delete")
+	}
+	if f.liveExists(rdGVK, testNSMyapp, "perm-disable-dst") {
+		t.Error("RD still in cluster after permissive delete")
+	}
+	f.assertDidWriteByVerb(t, 0, 0, 2)
+}
+
+// Permissive: enabled-only / manage-only / legacy-only / no-label /
+// backup-exempt all leave the cluster untouched — planner's empty Ops
+// is the gate, executor mechanics never engage.
+func TestV4Reconcile_Patch67_PermissiveWriteGatedScenarios_NoWrites(t *testing.T) {
+	cases := []struct {
+		name     string
+		ns, pvc  string
+		labels   map[string]string
+		anns     map[string]string
+		wantAct  ActionKind
+		wantExec bool // whether ExecutionResult should be non-nil
+	}{
+		{
+			"legacy-only",
+			testNSMyapp, "g-legacy",
+			map[string]string{backupLabelKey: backupHourly}, nil,
+			ActionWriteGateMissing, false,
+		},
+		{
+			"enabled-only",
+			testNSMyapp, "g-enabled",
+			map[string]string{v4labels.LabelEnabled: labelTrue, v4labels.LabelTier: backupDaily}, nil,
+			ActionWriteGateMissing, false,
+		},
+		{
+			"manage-only",
+			testNSMyapp, "g-manage",
+			map[string]string{v4labels.LabelManageVolSync: labelTrue, v4labels.LabelTier: backupDaily}, nil,
+			ActionSkippedNotOptedIn, false,
+		},
+		{
+			"no-labels",
+			testNSMyapp, "g-none",
+			nil, nil,
+			ActionSkippedNotOptedIn, false,
+		},
+		{
+			"backup-exempt",
+			testNSMyapp, "g-exempt",
+			map[string]string{backupExemptLabel: labelTrue},
+			map[string]string{v4labels.LegacyAnnotationBackupExemptReasonFQ: testReasonNASShort},
+			ActionSkippedExempt, false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pvc := makePVC(tc.ns, tc.pvc, tc.labels, tc.anns)
+			f := newV4ModeFixture(t, mode.Permissive, pvc)
+			entry := f.reconcile(tc.ns, tc.pvc)
+
+			if entry.Action != tc.wantAct {
+				t.Errorf("Action: got %q, want %q", entry.Action, tc.wantAct)
+			}
+			if len(entry.PlannedOps) != 0 {
+				t.Errorf("PlannedOps: got %d, want 0", len(entry.PlannedOps))
+			}
+			if (entry.ExecutionResult != nil) != tc.wantExec {
+				t.Errorf("ExecutionResult presence: got %v, want %v", entry.ExecutionResult != nil, tc.wantExec)
+			}
+			f.assertDidWriteByVerb(t, 0, 0, 0)
+			// Defense-in-depth: cluster must hold exactly one object —
+			// the PVC itself. Nothing executor-created appeared.
+			if f.liveExists(rsGVK, tc.ns, tc.pvc) {
+				t.Errorf("RS appeared in cluster for %s; permissive must not write when planner gate fires", tc.name)
+			}
+			if f.liveExists(rdGVK, tc.ns, tc.pvc+"-dst") {
+				t.Errorf("RD appeared in cluster for %s; permissive must not write when planner gate fires", tc.name)
+			}
+		})
+	}
+}
+
+// =============================================================================
+// 6.7 — Enforce + Strict mechanical parity with Permissive
+// =============================================================================
+
+// Enforce + Strict share executor mechanics with Permissive in Patch 6.7.
+// Same fixture, three modes, identical counts + identical cluster state
+// after the reconcile.
+func TestV4Reconcile_Patch67_EnforceStrictParityWithPermissive(t *testing.T) {
+	modes := []struct {
+		name string
+		m    mode.Mode
+	}{
+		{"permissive", mode.Permissive},
+		{"enforce", mode.Enforce},
+		{"strict", mode.Strict},
+	}
+	for _, tc := range modes {
+		t.Run(tc.name, func(t *testing.T) {
+			pvc := makePVC(testNSMyapp, "parity-pvc", labelsEnabledManage(), nil)
+			f := newV4ModeFixture(t, tc.m, pvc)
+			entry := f.reconcile(testNSMyapp, "parity-pvc")
+
+			if entry.Action != ActionWouldCreate {
+				t.Fatalf("Action: got %q, want %q", entry.Action, ActionWouldCreate)
+			}
+			if entry.ExecutionResult == nil || entry.ExecutionResult.Counts.Succeeded != 2 {
+				t.Errorf("ExecutionResult: got %+v, want Succeeded=2 in %s mode", entry.ExecutionResult, tc.name)
+			}
+			if !f.liveExists(rsGVK, testNSMyapp, "parity-pvc") || !f.liveExists(rdGVK, testNSMyapp, "parity-pvc-dst") {
+				t.Errorf("%s: cluster missing RS or RD after reconcile", tc.name)
+			}
+			f.assertDidWriteByVerb(t, 2, 0, 0)
+		})
+	}
+}
+
+// =============================================================================
+// 6.7 — Paranoia: no foreign GVKs in any permissive ExecutionResult
+// =============================================================================
+
+// Run every permissive scenario through a single fixture sweep, then
+// scan every entry's ExecutionResult.Outcomes for the GVK signature.
+// Only ReplicationSource and ReplicationDestination may ever appear.
+// This is the cross-cutting contract that lets us claim "the bounded
+// executor can never write a Secret/PVC/webhook/SA, even given a
+// buggy or compromised planner."
+func TestV4Reconcile_Patch67_PermissiveOutcomesOnlyTargetVolSyncGVKs(t *testing.T) {
+	// One PVC per scenario, unique names so each lands in its own
+	// Store entry.
+	pvcCreate := makePVC(testNSMyapp, "p-create", labelsEnabledManage(), nil)
+	pvcUpdate := makePVC(testNSMyapp, "p-update", labelsEnabledManage(), nil)
+	rsUpdate := makeRS(testNSMyapp, "p-update", ManagedByPVCPlumberLabelValue, "stale", "p-update")
+	rdUpdate := makeRD(testNSMyapp, "p-update-dst", ManagedByPVCPlumberLabelValue, "stale")
+	pvcDelete := makePVC(testNSMyapp, "p-delete", labelsEnabledManageTier("disabled"), nil)
+	rsDelete := makeRS(testNSMyapp, "p-delete", ManagedByPVCPlumberLabelValue, testRepoSecretShare, "p-delete")
+	rdDelete := makeRD(testNSMyapp, "p-delete-dst", ManagedByPVCPlumberLabelValue, testRepoSecretShare)
+	pvcLegacy := makePVC(testNSMyapp, "p-legacy", map[string]string{backupLabelKey: backupHourly}, nil)
+	pvcExempt := makePVC(testNSMyapp, "p-exempt",
+		map[string]string{backupExemptLabel: labelTrue},
+		map[string]string{v4labels.LegacyAnnotationBackupExemptReasonFQ: testReasonNASShort})
+
+	f := newV4ModeFixture(t, mode.Permissive,
+		pvcCreate,
+		pvcUpdate, rsUpdate, rdUpdate,
+		pvcDelete, rsDelete, rdDelete,
+		pvcLegacy,
+		pvcExempt,
+	)
+	f.reconcile(testNSMyapp, "p-create")
+	f.reconcile(testNSMyapp, "p-update")
+	f.reconcile(testNSMyapp, "p-delete")
+	f.reconcile(testNSMyapp, "p-legacy")
+	f.reconcile(testNSMyapp, "p-exempt")
+
+	// PlannedOps (planner-side) constraint.
+	assertPlannedOpsTargetVolSyncOnly(t, f.store)
+
+	// ExecutionResult (executor-side) constraint — the paranoia walk
+	// Patch 6.7 adds. Every outcome's GVK MUST be RS or RD.
+	snap := f.store.Snapshot()
+	for _, e := range snap.Entries {
+		if e.ExecutionResult == nil {
+			continue
+		}
+		for _, out := range e.ExecutionResult.Outcomes {
+			if out.GVK != rsGVKStr && out.GVK != rdGVKStr {
+				t.Errorf("foreign executor-outcome GVK %q for entry %s/%s (status=%q reason=%q)",
+					out.GVK, e.Namespace, e.PVC, out.Status, out.Reason)
+			}
+		}
+	}
+
+	// Aggregate write volume: 2 creates (p-create) + 2 updates
+	// (p-update) + 2 deletes (p-delete) = 6 verbs.
+	f.assertDidWriteByVerb(t, 2, 2, 2)
+}
+
+// =============================================================================
+// 6.7 — v3 isolation: V4AuditReconciler never writes chart-era resources
+// =============================================================================
+//
+// The v4 reconciler observes only v4-named expected resources (<pvc> /
+// <pvc>-dst). A PVC that has only chart-era children (<pvc>-backup) is
+// not adopted under permissive — the planner returns
+// ActionWriteGateMissing because legacy backup: labels remain
+// reporting-only, AND the chart-era resources don't match the v4
+// expected names so observeCurrent reports no current state. Even if
+// the labels were upgraded to v4, the planner would emit creates with
+// v4 names, and the chart-era resources would be left alone (no adopt,
+// no delete). This isolates v3 chart-era state from v4 mutations.
+
+func TestV4Reconcile_Patch67_PermissiveChartEraResourcesUntouched(t *testing.T) {
+	pvc := makePVC(testNSMyapp, "iso-pvc", labelsEnabledManage(), nil)
+	// Chart-era shape: shared name "<pvc>-backup", pvc-plumber-owned.
+	chartRS := makeRS(testNSMyapp, "iso-pvc-backup", ManagedByPVCPlumberLabelValue, testRepoSecretShare, "iso-pvc")
+	chartRD := makeRD(testNSMyapp, "iso-pvc-backup", ManagedByPVCPlumberLabelValue, testRepoSecretShare)
+	f := newV4ModeFixture(t, mode.Permissive, pvc, chartRS, chartRD)
+
+	entry := f.reconcile(testNSMyapp, "iso-pvc")
+
+	// Planner sees no current resources at the v4 names → emits 2
+	// creates for the v4-named resources.
+	if entry.Action != ActionWouldCreate {
+		t.Errorf("Action: got %q, want %q", entry.Action, ActionWouldCreate)
+	}
+	if entry.ExecutionResult == nil || entry.ExecutionResult.Counts.Succeeded != 2 {
+		t.Errorf("ExecutionResult: got %+v, want Succeeded=2", entry.ExecutionResult)
+	}
+	// v4-named resources now exist.
+	if !f.liveExists(rsGVK, testNSMyapp, "iso-pvc") {
+		t.Error("v4-named RS missing after permissive reconcile")
+	}
+	if !f.liveExists(rdGVK, testNSMyapp, "iso-pvc-dst") {
+		t.Error("v4-named RD missing after permissive reconcile")
+	}
+	// Chart-era resources are untouched — the executor's GVK + name +
+	// ownership chain never landed on them because the planner never
+	// emitted ops targeting them.
+	if !f.liveExists(rsGVK, testNSMyapp, "iso-pvc-backup") {
+		t.Error("chart-era RS (iso-pvc-backup) was deleted; v4 must leave chart-era alone")
+	}
+	if !f.liveExists(rdGVK, testNSMyapp, "iso-pvc-backup") {
+		t.Error("chart-era RD (iso-pvc-backup) was deleted; v4 must leave chart-era alone")
+	}
+	// Verb totals: 2 creates only (the chart-era resources are seed,
+	// not executor output).
+	f.assertDidWriteByVerb(t, 2, 0, 0)
 }

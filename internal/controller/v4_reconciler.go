@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/mitchross/pvc-plumber/internal/v4/executor"
 	"github.com/mitchross/pvc-plumber/internal/v4/labels"
 	"github.com/mitchross/pvc-plumber/internal/v4/mode"
 	"github.com/mitchross/pvc-plumber/internal/v4/naming"
@@ -21,26 +22,51 @@ import (
 )
 
 // Phase 5 — Patch 3: V4AuditReconciler skeleton/orchestration.
+// Phase 6 — Patch 6.7: bounded executor wired into the same Reconcile path.
 //
 // Orchestrates the Patch 1 (ParityEntry / Store) and Patch 2
 // (ClassifyLabelSource / ComputeExpected / ClassifyOwner / DecideAction)
 // pure helpers with the only cluster-touching code path Phase 5 owns:
 // reading PVC + RS + RD via the embedded client.
 //
-// Contract:
+// As of Patch 6.7 the reconciler is the v4 reconciler used by both audit
+// AND permissive/enforce/strict modes — the Mode field on the struct
+// switches between observe-only and bounded-write behavior. The
+// V4AuditReconciler name is preserved for git history continuity; a
+// cosmetic rename to V4Reconciler is a follow-up cleanup after the
+// karakeep canary.
 //
-//   - Performs zero writes. The reconciler never calls Create, Update,
-//     Patch, Delete, or DeleteAllOf. In audit-mode production deployments
-//     this is double-checked by the auditclient wrapper around the
-//     embedded client, but the design intent is that this reconciler
-//     would do no harm even given a raw write-capable client.
+// IMPORTANT: cmd/operator/main.go still routes ONLY audit-mode traffic
+// to this reconciler in Patch 6.7 (see reconcilerKindFor). The
+// permissive route-flip is a separate sub-patch (6.7-wire). Patch 6.7
+// proves the reconciler+executor pair work correctly under test;
+// 6.7-wire makes the production binary actually use them.
+//
+// Contract (mode-gated):
+//
+//   - mode.Audit / mode.Unspecified: zero writes. The reconciler reads
+//     the PVC, plans, then invokes executor.Execute which short-circuits
+//     and records every planned op as Skipped. The auditclient wrapper
+//     around the embedded client provides a second independent layer
+//     of defense.
+//
+//   - mode.Permissive / mode.Enforce / mode.Strict: the executor applies
+//     the planner's ops with its own GVK allow-list and ownership re-
+//     check at the cluster boundary. Webhook deny / restore semantics
+//     that differentiate enforce and strict from permissive are Phase 8
+//     work, not Patch 6.7 — for executor mechanics these three modes
+//     are identical.
 //
 //   - Reads three things per Reconcile: the PVC itself (corev1), and the
 //     expected RS and RD (volsync.backube/v1alpha1, as unstructured).
 //
 //   - Writes one Store entry per Reconcile. The entry describes the
 //     full per-PVC parity verdict the /audit endpoint (Patch 4) will
-//     return.
+//     return. From 6.7 onward, the entry also carries an optional
+//     ExecutionResult summarizing the executor's per-op verdicts
+//     (populated only when the planner emitted at least one op; nil
+//     for already-matches / skipped-* / write-gate-missing rows so the
+//     report stays skimmable).
 //
 //   - On PVC NotFound: deletes the Store entry. Rationale: the Store
 //     models the current cluster's PVC inventory. A deleted PVC is no
@@ -54,12 +80,18 @@ import (
 //     the report. The PVCReconciler v3 does the same for the same
 //     reason (defense-in-depth against webhook namespaceSelector drift).
 //
-// This reconciler is NOT registered by cmd/operator/main.go yet
-// (Patch 5 does that). Currently it exists as a standalone testable unit.
+// As of Patch 6.7 the reconciler is registered for audit-mode traffic
+// only (cmd/operator/main.go.reconcilerKindFor returns
+// reconcilerKindV4Audit for audit and reconcilerKindV3 for everything
+// else). Permissive/enforce/strict still hit the v3 chart-era
+// PVCReconciler in production until 6.7-wire lands.
 
-// V4AuditReconciler watches PVCs and writes parity entries to the Store.
-// In audit mode (the only mode Phase 5 cares about today) every Reconcile
-// is a pure observe-and-classify operation.
+// V4AuditReconciler watches PVCs, writes parity entries to the Store, and
+// (from Patch 6.7 onward) invokes the bounded executor to apply planner
+// ops when Mode != audit. In audit mode every Reconcile is a pure
+// observe-and-classify operation. The name keeps "Audit" for git history
+// continuity; the body is the v4 reconciler used by all modes Patch 6.7
+// reaches.
 type V4AuditReconciler struct {
 	client.Client
 
@@ -91,12 +123,26 @@ type V4AuditReconciler struct {
 	// depend on it.
 	OperatorMode string
 
+	// Mode gates executor.Execute. mode.Audit (or the zero value
+	// mode.Unspecified, which executor.Execute treats identically)
+	// short-circuits the executor: every planned op is recorded as
+	// Skipped without any client.Create/Update/Delete call. In
+	// mode.Permissive / Enforce / Strict the executor applies the
+	// planner's ops with its own GVK allow-list and ownership re-checks
+	// at the cluster boundary. Patch 6.7 wires only audit-mode traffic
+	// into the production binary; the permissive route flip is a
+	// separate sub-patch (6.7-wire). Tests exercise the executor's
+	// permissive mechanics directly.
+	Mode mode.Mode
+
 	// Operator-wide defaults piped into planner.Inputs so the planner's
 	// builder can render fully-formed RS/RD resources when proposing
-	// create/update operations. All zero values are safe in Patch 6.5
-	// (audit-only; the rendered ops are surfaced as PlannedOps but never
-	// applied). Patch 6.7 will wire real values from cmd/operator/main.go
-	// when permissive-mode writes turn on.
+	// create/update operations. Zero values are tolerated in audit mode
+	// (the rendered ops are recorded as Skipped). For Mode=Permissive+
+	// the operator binary should set these from its runtime config so
+	// the executor writes resources with realistic snapshot class,
+	// cache capacity, etc. Patch 6.7-wire (the main.go route flip)
+	// wires the real defaults from cmd/operator/main.go.
 	DefaultSnapshotClass string
 	DefaultCacheCapacity string
 	DefaultStorageClass  string
@@ -215,10 +261,28 @@ func (r *V4AuditReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		DefaultFSGroup:       r.DefaultFSGroup,
 	})
 
-	// Step 10: assemble + Store. PlannedOps is reduced to a compact
+	// Step 10: bounded executor. In audit / unspecified mode this
+	// short-circuits inside executor.Execute and records every op as
+	// Skipped without touching the cluster. In permissive+ modes the
+	// executor enforces its own GVK allow-list (RS/RD only) and re-
+	// checks ownership on Update/Delete at the cluster boundary —
+	// independent defense-in-depth on top of the planner's rule 7
+	// ownership gates and rule 6 write-fuse check. Per-op errors are
+	// captured inside the Result; Execute never returns a Go error,
+	// so we don't need to unwind the reconcile on apiserver failures.
+	// The reconciler decides what to log + whether to surface the
+	// failures in the Store entry.
+	execResult := executor.Execute(ctx, r.Client, r.Mode, plan)
+
+	// Step 11: assemble + Store. PlannedOps is reduced to a compact
 	// summary (Kind / GVK / Namespace / Name) so the /audit response
 	// stays human-skimmable while still proving the planner only ever
 	// targets ReplicationSource / ReplicationDestination.
+	//
+	// ExecutionResult is populated only when the planner emitted ops.
+	// already-matches / skipped-* / write-gate-missing rows leave the
+	// field nil so /audit stays terse for the bulk of the cluster's
+	// PVCs.
 	entry := ParityEntry{
 		Namespace:      req.Namespace,
 		PVC:            req.Name,
@@ -234,6 +298,28 @@ func (r *V4AuditReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		Notes:          plan.Notes,
 		PlannedOps:     toPlannedOpSummaries(plan.Ops),
 	}
+	if len(plan.Ops) > 0 {
+		summary := toExecutionResultSummary(execResult)
+		entry.ExecutionResult = &summary
+		// Log apiserver error details for failed ops. /audit
+		// deliberately omits raw Err strings (stable JSON shape), so
+		// without this loop a timeout / RBAC denial / conflict would
+		// only appear as Status=failed with no diagnostic context.
+		// Refusals are skipped — they're well-defined safety outcomes
+		// ("forbidden-kind", "not-owned", "exists") visible in
+		// ExecutionResult.Outcomes already.
+		for _, op := range execResult.Attempted {
+			if op.Status == executor.OpFailed && op.Err != nil {
+				logger.Error(op.Err, "v4 executor: op failed",
+					"kind", op.Kind,
+					"gvk", op.GVK,
+					"namespace", op.Namespace,
+					"name", op.Name,
+					"reason", op.Reason,
+				)
+			}
+		}
+	}
 	if r.Now != nil {
 		entry.EvaluatedAt = r.Now()
 	}
@@ -245,9 +331,37 @@ func (r *V4AuditReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		"label_source", string(entry.LabelSource),
 		"blockers", len(plan.Blockers),
 		"planned_ops", len(plan.Ops),
+		"exec_skipped", execResult.Counts.Skipped,
+		"exec_succeeded", execResult.Counts.Succeeded,
+		"exec_refused", execResult.Counts.Refused,
+		"exec_failed", execResult.Counts.Failed,
 	)
 
 	return ctrl.Result{}, nil
+}
+
+// toExecutionResultSummary translates the executor's Result into the
+// /audit-friendly summary shape. Drops the raw Go error attached to
+// failed ops; the reconciler logs error details via
+// logExecutionFailures so /audit consumers see a stable JSON shape
+// without opaque error strings.
+func toExecutionResultSummary(r executor.Result) ExecutionResultSummary {
+	out := ExecutionResultSummary{Counts: r.Counts}
+	if len(r.Attempted) == 0 {
+		return out
+	}
+	out.Outcomes = make([]ExecutionOpOutcome, 0, len(r.Attempted))
+	for _, op := range r.Attempted {
+		out.Outcomes = append(out.Outcomes, ExecutionOpOutcome{
+			Kind:      op.Kind,
+			GVK:       op.GVK,
+			Namespace: op.Namespace,
+			Name:      op.Name,
+			Status:    string(op.Status),
+			Reason:    op.Reason,
+		})
+	}
+	return out
 }
 
 // toPlannerCurrent translates the controller-package CurrentState into

@@ -4,6 +4,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/mitchross/pvc-plumber/internal/v4/executor"
 )
 
 // Phase 5 — Patch 1: parity-report data model.
@@ -268,24 +270,59 @@ type PlannedOpSummary struct {
 	Name      string `json:"name"`
 }
 
+// ExecutionOpOutcome is the /audit-friendly per-op record produced by the
+// bounded executor (Patch 6.7). Mirrors executor.OpOutcome but strips the
+// raw Go error — apiserver error details are emitted to the reconciler's
+// structured log instead, so /audit consumers see a stable JSON shape
+// without opaque error strings leaking into the report.
+//
+// Status values come straight from executor.OpStatus: "skipped" (audit
+// mode short-circuit), "succeeded", "refused", "failed". Reason is a
+// short stable code: "forbidden-kind", "exists", "not-owned", "absent",
+// "create-failed", "update-failed", "delete-failed", "get-failed",
+// "mode=audit", and similar.
+type ExecutionOpOutcome struct {
+	Kind      string `json:"kind"`
+	GVK       string `json:"gvk"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// ExecutionResultSummary is the executor's verdict for a single reconcile
+// pass, attached to ParityEntry.ExecutionResult only when the planner
+// actually emitted ops. already-matches / skipped-exempt / skipped-not-
+// opted-in / write-gate-missing entries leave ExecutionResult nil so the
+// /audit response stays skimmable for the bulk of the cluster's PVCs.
+//
+// In audit mode every op shows up under Counts.Skipped (executor short-
+// circuit, no apiserver writes). In permissive+ modes Counts reflects
+// the real apiserver verdicts produced by Execute.
+type ExecutionResultSummary struct {
+	Counts   executor.Counts      `json:"counts"`
+	Outcomes []ExecutionOpOutcome `json:"outcomes,omitempty"`
+}
+
 // ParityEntry is one row in the audit report — the desired-vs-current
 // view for a single PVC at a single point in time.
 type ParityEntry struct {
-	Namespace      string              `json:"namespace"`
-	PVC            string              `json:"pvc"`
-	Mode           string              `json:"mode"`
-	Tier           string              `json:"tier"`
-	LabelSource    LabelSource         `json:"label_source"`
-	BackupIdentity string              `json:"backup_identity,omitempty"`
-	Expected       ExpectedState       `json:"expected,omitzero"`
-	Current        CurrentState        `json:"current,omitzero"`
-	Owner          OwnerClassification `json:"owner_classification"`
-	Action         ActionKind          `json:"action"`
-	Blockers       []string            `json:"blockers,omitempty"`
-	Notes          []string            `json:"notes,omitempty"`
-	PlannedOps     []PlannedOpSummary  `json:"planned_ops,omitempty"`
-	ReasonCode     string              `json:"reason_code,omitempty"`
-	EvaluatedAt    time.Time           `json:"evaluated_at"`
+	Namespace       string                  `json:"namespace"`
+	PVC             string                  `json:"pvc"`
+	Mode            string                  `json:"mode"`
+	Tier            string                  `json:"tier"`
+	LabelSource     LabelSource             `json:"label_source"`
+	BackupIdentity  string                  `json:"backup_identity,omitempty"`
+	Expected        ExpectedState           `json:"expected,omitzero"`
+	Current         CurrentState            `json:"current,omitzero"`
+	Owner           OwnerClassification     `json:"owner_classification"`
+	Action          ActionKind              `json:"action"`
+	Blockers        []string                `json:"blockers,omitempty"`
+	Notes           []string                `json:"notes,omitempty"`
+	PlannedOps      []PlannedOpSummary      `json:"planned_ops,omitempty"`
+	ExecutionResult *ExecutionResultSummary `json:"execution_result,omitempty"`
+	ReasonCode      string                  `json:"reason_code,omitempty"`
+	EvaluatedAt     time.Time               `json:"evaluated_at"`
 }
 
 // Key returns the stable map key used by the Store and by the /audit
