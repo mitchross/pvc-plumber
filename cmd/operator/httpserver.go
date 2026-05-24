@@ -139,6 +139,46 @@ func newHTTPServer(cfg *config.Config, b *backendBundle, logger *slog.Logger) *h
 	}
 }
 
+// newAuditHTTPServer wires the audit-mode HTTP surface: /audit (the
+// parity report from handler.AuditHandler) plus inline /healthz and
+// /readyz so kube liveness/readiness probes can hit the same port the
+// legacy server uses in non-audit modes. Backend-independent: nothing
+// in here imports or invokes any backend code path, by design.
+//
+// /exists is deliberately not mounted. Audit-mode pods are not in the
+// admission decision path; surfacing /exists would be misleading at
+// best and a foot-gun at worst (the audit binary has no backend
+// initialized, so the handler would 503 every request).
+//
+// /metrics is also not mounted here. The controller-runtime manager
+// exposes its own /metrics on metricsAddr (:8081 by default), which
+// is sufficient for audit-mode observability.
+func newAuditHTTPServer(cfg *config.Config, store handler.ParitySnapshotter, logger *slog.Logger) *http.Server {
+	audit := handler.NewAuditHandler(store, logger)
+
+	mux := http.NewServeMux()
+	mux.Handle("/audit", audit)
+	mux.HandleFunc("/healthz", audithealthHandler)
+	mux.HandleFunc("/readyz", audithealthHandler)
+
+	return &http.Server{
+		Addr:         ":" + cfg.Port,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+}
+
+// audithealthHandler is a backend-free liveness/readiness probe used by
+// the audit-mode HTTP server. Audit mode has no backend to health-check
+// against, so "the process is running" is the strongest signal we can
+// give — anything more would require initializing the very backend the
+// audit-mode promise says we will not touch.
+func audithealthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
 // runCacheReWarmLoop is a verbatim port of the same function in
 // cmd/pvc-plumber/main.go. Periodically re-runs `kopia snapshot list --all`
 // and refreshes the cache so deleted backups stop returning stale

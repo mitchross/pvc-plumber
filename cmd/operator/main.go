@@ -43,9 +43,31 @@ import (
 	"github.com/mitchross/pvc-plumber/internal/config"
 	"github.com/mitchross/pvc-plumber/internal/controller"
 	"github.com/mitchross/pvc-plumber/internal/v4/auditclient"
+	"github.com/mitchross/pvc-plumber/internal/v4/mode"
+	"github.com/mitchross/pvc-plumber/internal/v4/naming"
 	"github.com/mitchross/pvc-plumber/internal/v4/runtimeconfig"
 	pvcwebhook "github.com/mitchross/pvc-plumber/internal/webhook"
 )
+
+// Reconciler-selection sentinels. Exported as constants (lowercase OK
+// since they don't leave package main) so wiring tests can assert the
+// exact string runManager would pick for a given mode without standing
+// up a manager.
+const (
+	reconcilerKindV3      = "v3"
+	reconcilerKindV4Audit = "v4-audit"
+)
+
+// reconcilerKindFor is the single source of truth for "which reconciler
+// runs in this mode." Audit mode runs the V4AuditReconciler exclusively;
+// every other mode keeps the existing v3 PVCReconciler path. Tested in
+// main_test.go so a future mode addition forces an explicit decision.
+func reconcilerKindFor(m mode.Mode) string {
+	if m == mode.Audit {
+		return reconcilerKindV4Audit
+	}
+	return reconcilerKindV3
+}
 
 // defaultSystemNamespaces is the canonical, deadlock-prevention namespace set
 // that pvc-plumber must NOT process under any circumstance. These entries are
@@ -196,6 +218,21 @@ func main() {
 			"mode", runtimeCfg.Mode.String())
 	}
 
+	// In audit mode the V4AuditReconciler (registered inside runManager)
+	// and the /audit HTTP handler (mounted on auditSrv below) share one
+	// in-memory parity Store. Constructed up here so both subsystems
+	// receive the same instance — the reconciler writes parity entries,
+	// the handler serves them. In non-audit modes the store is left nil
+	// and no audit subsystem is wired.
+	var auditStore *controller.Store
+	if runtimeCfg.Mode == mode.Audit {
+		auditStore = controller.NewStore(
+			runtimeCfg.Mode.String(),
+			naming.StrategyBareDst.String(),
+			naming.DefaultRepoSecretName,
+		)
+	}
+
 	// errgroup collects errors from any subsystem. ctx derives from
 	// rootCtx; if any goroutine returns non-nil, ctx cancels and the rest
 	// shut down. mgr.Start respects that ctx; http.Server respects it via
@@ -235,7 +272,34 @@ func main() {
 			})
 		}
 	} else {
-		slogger.Info("audit mode: HTTP server + cache re-warm loop NOT started")
+		slogger.Info("audit mode: legacy HTTP server (/exists) + cache re-warm loop NOT started")
+	}
+
+	// Audit-mode HTTP server. Backend-independent: serves only /audit
+	// (parity report), /healthz, /readyz. No /exists, no /metrics
+	// (controller-runtime exposes its own /metrics on metricsAddr).
+	// Bound to cfg.Port — same socket the legacy server uses in
+	// non-audit modes, so liveness/readiness probes don't have to know
+	// which mode the pod is running in.
+	if auditStore != nil {
+		auditSrv := newAuditHTTPServer(cfg, auditStore, slogger)
+		g.Go(func() error {
+			slogger.Info("audit http server starting", "addr", auditSrv.Addr)
+			if err := auditSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("audit http server: %w", err)
+			}
+			return nil
+		})
+		g.Go(func() error {
+			<-gctx.Done()
+			slogger.Info("audit http server shutting down")
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := auditSrv.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("audit http shutdown: %w", err)
+			}
+			return nil
+		})
 	}
 
 	// 3. controller-runtime manager — only when OPERATOR_MODE=true. This
@@ -254,6 +318,7 @@ func main() {
 				cfg,
 				runtimeCfg,
 				sysNs,
+				auditStore,
 				metricsAddr, probeAddr,
 				webhookPort, webhookCertDir,
 				enableLeaderElection, leaderElectionID,
@@ -292,6 +357,7 @@ func runManager(
 	cfg *config.Config,
 	runtimeCfg runtimeconfig.Config,
 	sysNs map[string]struct{},
+	auditStore *controller.Store,
 	metricsAddr, probeAddr string,
 	webhookPort int, webhookCertDir string,
 	enableLeaderElection bool, leaderElectionID string,
@@ -332,34 +398,69 @@ func runManager(
 		return fmt.Errorf("create manager: %w", err)
 	}
 
-	// PVC reconciler. The reconciler intentionally does NOT take a Kopia
-	// client — it only manages ES/RS/RD lifecycle and trusts admission
-	// webhooks for the actual restore decisions. The ExternalSecretConfig
-	// is plumbed through so the per-PVC `volsync-<pvc>` ES the reconciler
-	// renders points at the right ClusterSecretStore / vault item /
-	// property names for this deployment (defaults pin to the reference
-	// cluster's 1Password Connect layout — see internal/config).
-	//
 	// Phase 2.5: wrap mgr.GetClient() with auditclient so every write
 	// the reconciler attempts is gated by runtimeCfg.Mode. In audit mode
 	// the wrapper logs "would-write" and returns nil without touching the
 	// cluster — see internal/v4/auditclient.
 	reconcilerClient := auditclient.New(mgr.GetClient(), runtimeCfg.Mode, slogger)
-	if err := (&controller.PVCReconciler{
-		Client:           reconcilerClient,
-		SystemNamespaces: sysNs,
-		ExternalSecret: controller.ExternalSecretConfig{
-			SecretStoreName:       cfg.ExternalSecretsStoreName,
-			VaultKey:              cfg.ExternalSecretsVaultKey,
-			KopiaPasswordProperty: cfg.ExternalSecretsKopiaPasswordProperty,
-			S3AccessKeyProperty:   cfg.ExternalSecretsS3AccessKeyProperty,
-			S3SecretKeyProperty:   cfg.ExternalSecretsS3SecretKeyProperty,
-			S3Endpoint:            cfg.KopiaS3Endpoint,
-			S3Bucket:              cfg.KopiaS3Bucket,
-			S3DisableTLS:          cfg.KopiaS3DisableTLS,
-		},
-	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("setup PVCReconciler: %w", err)
+
+	// Reconciler selection. Audit mode runs ONLY V4AuditReconciler — the
+	// v3 PVCReconciler is not registered, so even an unintended Get on
+	// the audit-wrapped client can't trigger v3 ensure/update paths.
+	// Every other mode keeps the existing v3 path unchanged (Patch 5
+	// constraint: non-audit behavior must not shift during the audit
+	// rollout). reconcilerKindFor is the single source of truth for
+	// this mapping — see top of file + main_test.go.
+	switch reconcilerKindFor(runtimeCfg.Mode) {
+	case reconcilerKindV4Audit:
+		if auditStore == nil {
+			return fmt.Errorf("audit mode requires a non-nil auditStore; main() must construct one")
+		}
+		if err := (&controller.V4AuditReconciler{
+			Client:            reconcilerClient,
+			Store:             auditStore,
+			NamingStrategy:    naming.StrategyBareDst,
+			DefaultRepoSecret: naming.DefaultRepoSecretName,
+			SystemNamespaces:  sysNs,
+			OperatorMode:      runtimeCfg.Mode.String(),
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("setup V4AuditReconciler: %w", err)
+		}
+		slogger.Info("v4 audit reconciler registered (v3 reconciler NOT registered)",
+			"mode", runtimeCfg.Mode.String(),
+			"naming_strategy", naming.StrategyBareDst.String(),
+			"default_repo_secret", naming.DefaultRepoSecretName,
+			"system_namespaces", len(sysNs),
+		)
+
+	default:
+		// PVC reconciler (v3). The reconciler intentionally does NOT
+		// take a Kopia client — it only manages ES/RS/RD lifecycle and
+		// trusts admission webhooks for the actual restore decisions.
+		// The ExternalSecretConfig is plumbed through so the per-PVC
+		// `volsync-<pvc>` ES the reconciler renders points at the
+		// right ClusterSecretStore / vault item / property names for
+		// this deployment (defaults pin to the reference cluster's
+		// 1Password Connect layout — see internal/config).
+		if err := (&controller.PVCReconciler{
+			Client:           reconcilerClient,
+			SystemNamespaces: sysNs,
+			ExternalSecret: controller.ExternalSecretConfig{
+				SecretStoreName:       cfg.ExternalSecretsStoreName,
+				VaultKey:              cfg.ExternalSecretsVaultKey,
+				KopiaPasswordProperty: cfg.ExternalSecretsKopiaPasswordProperty,
+				S3AccessKeyProperty:   cfg.ExternalSecretsS3AccessKeyProperty,
+				S3SecretKeyProperty:   cfg.ExternalSecretsS3SecretKeyProperty,
+				S3Endpoint:            cfg.KopiaS3Endpoint,
+				S3Bucket:              cfg.KopiaS3Bucket,
+				S3DisableTLS:          cfg.KopiaS3DisableTLS,
+			},
+		}).SetupWithManager(mgr); err != nil {
+			return fmt.Errorf("setup PVCReconciler: %w", err)
+		}
+		slogger.Info("v3 PVC reconciler registered",
+			"mode", runtimeCfg.Mode.String(),
+		)
 	}
 
 	// Admission webhook handlers. The decoder is built from the manager's
