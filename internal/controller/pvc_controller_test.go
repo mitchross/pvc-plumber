@@ -769,7 +769,7 @@ func TestReconcile_SystemNamespace_ShortCircuits(t *testing.T) {
 // (the bulk of the cluster) see no behavior change.
 func TestLabelSafePVCRef_ShortNameUnchanged(t *testing.T) {
 	cases := []string{
-		"data",
+		testPVCName,
 		"prometheus-data-0", // realistic short prom name
 		strings.Repeat("a", k8sLabelValueMaxLen),
 	}

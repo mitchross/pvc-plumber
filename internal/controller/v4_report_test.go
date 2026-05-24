@@ -102,7 +102,7 @@ func TestStore_BasicSetGetDeleteLen(t *testing.T) {
 
 	e := ParityEntry{
 		Namespace:   "myapp",
-		PVC:         "data",
+		PVC:         testPVCName,
 		Mode:        testModeAudit,
 		Tier:        backupDaily,
 		LabelSource: LabelSourceV4,
@@ -250,7 +250,7 @@ func TestSnapshot_Metadata(t *testing.T) {
 	s.now = fixedTime
 	rep := s.Snapshot()
 
-	if rep.OperatorMode != "audit" {
+	if rep.OperatorMode != testModeAudit {
 		t.Errorf("OperatorMode: got %q, want audit", rep.OperatorMode)
 	}
 	if rep.NamingStrategy != "bare-dst" {
@@ -268,8 +268,8 @@ func TestParityEntry_JSONRoundTrip(t *testing.T) {
 	original := ParityEntry{
 		Namespace:      testNSOpenWebUI,
 		PVC:            testPVCStorageName,
-		Mode:           "audit",
-		Tier:           "daily",
+		Mode:           testModeAudit,
+		Tier:           backupDaily,
 		LabelSource:    LabelSourceLegacy,
 		BackupIdentity: testNSOpenWebUI + "/" + testPVCStorageName,
 		Expected: ExpectedState{

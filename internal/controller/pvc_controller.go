@@ -446,7 +446,7 @@ func (r *PVCReconciler) legacyESNeedsRecycle(ctx context.Context, namespace, nam
 // numeric "1"/"0" or capital "True"/"False" only changes one place.
 func boolToString(b bool) string {
 	if b {
-		return "true"
+		return labelTrue
 	}
 	return "false"
 }
@@ -471,10 +471,10 @@ func (r *PVCReconciler) ensureReplicationSource(ctx context.Context, pvc *corev1
 			"compression": "zstd-fastest",
 			"parallelism": int64(2),
 			"retain": map[string]interface{}{
-				"hourly":  int64(24),
-				"daily":   int64(7),
-				"weekly":  int64(4),
-				"monthly": int64(2),
+				backupHourly: int64(24),
+				backupDaily:  int64(7),
+				"weekly":     int64(4),
+				"monthly":    int64(2),
 			},
 			"copyMethod":              "Snapshot",
 			"storageClassName":        "longhorn",
