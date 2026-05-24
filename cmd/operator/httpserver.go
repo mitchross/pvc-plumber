@@ -139,20 +139,26 @@ func newHTTPServer(cfg *config.Config, b *backendBundle, logger *slog.Logger) *h
 	}
 }
 
-// newAuditHTTPServer wires the audit-mode HTTP surface: /audit (the
-// parity report from handler.AuditHandler) plus inline /healthz and
-// /readyz so kube liveness/readiness probes can hit the same port the
-// legacy server uses in non-audit modes. Backend-independent: nothing
-// in here imports or invokes any backend code path, by design.
+// newAuditHTTPServer wires the v4 HTTP surface: /audit (the parity
+// report from handler.AuditHandler) plus inline /healthz and /readyz
+// so kube liveness/readiness probes can hit the same port the legacy
+// server uses for non-v4 modes. Backend-independent: nothing in here
+// imports or invokes any backend code path, by design.
 //
-// /exists is deliberately not mounted. Audit-mode pods are not in the
-// admission decision path; surfacing /exists would be misleading at
-// best and a foot-gun at worst (the audit binary has no backend
-// initialized, so the handler would 503 every request).
+// As of Patch 6.7-wire this server is mounted for any mode that
+// routes to the v4 reconciler — audit AND permissive. The function
+// name "newAuditHTTPServer" is preserved for git history continuity;
+// the dual-mode purpose is documented here and at the call site in
+// main.go. A cosmetic rename to newV4HTTPServer is a future cleanup.
+//
+// /exists is deliberately not mounted. v4-routed pods are not in the
+// admission decision path and the binary does not initialize a
+// backend (audit + permissive both skip buildBackend), so surfacing
+// /exists would either crash or return misleading 503s.
 //
 // /metrics is also not mounted here. The controller-runtime manager
 // exposes its own /metrics on metricsAddr (:8081 by default), which
-// is sufficient for audit-mode observability.
+// is sufficient for v4-mode observability.
 func newAuditHTTPServer(cfg *config.Config, store handler.ParitySnapshotter, logger *slog.Logger) *http.Server {
 	audit := handler.NewAuditHandler(store, logger)
 
@@ -170,10 +176,10 @@ func newAuditHTTPServer(cfg *config.Config, store handler.ParitySnapshotter, log
 }
 
 // audithealthHandler is a backend-free liveness/readiness probe used by
-// the audit-mode HTTP server. Audit mode has no backend to health-check
-// against, so "the process is running" is the strongest signal we can
-// give — anything more would require initializing the very backend the
-// audit-mode promise says we will not touch.
+// the v4 HTTP server (audit + permissive). v4-routed modes have no
+// backend to health-check against, so "the process is running" is
+// the strongest signal we can give — anything more would require
+// initializing the very backend the v4 promise says we will not touch.
 func audithealthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"status":"ok"}`))

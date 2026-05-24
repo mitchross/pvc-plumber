@@ -118,20 +118,26 @@ func TestParseSystemNamespaces_AlwaysSeedsDefaults(t *testing.T) {
 }
 
 // TestReconcilerKindFor pins the reconciler selection contract for
-// every mode. Audit mode runs the v4 audit reconciler exclusively; all
-// other modes keep the existing v3 path. A future mode addition (e.g.
-// "dry-run-strict") will fail this test by routing to "v3" and force
-// an explicit decision about which reconciler should run there.
+// every mode. As of Patch 6.7-wire, audit AND permissive both route
+// to the v4 reconciler; enforce/strict are rejected at startup by
+// validateMode and never reach this predicate, but their defensive
+// fallback maps to v3. A future mode addition (e.g. "dry-run-strict")
+// will fail this test and force an explicit decision about which
+// reconciler should run there.
 func TestReconcilerKindFor(t *testing.T) {
 	cases := []struct {
 		name string
 		m    mode.Mode
 		want string
 	}{
-		{"audit → v4-audit", mode.Audit, reconcilerKindV4Audit},
-		{"permissive → v3", mode.Permissive, reconcilerKindV3},
-		{"enforce → v3", mode.Enforce, reconcilerKindV3},
-		{"strict → v3", mode.Strict, reconcilerKindV3},
+		{"audit → v4", mode.Audit, reconcilerKindV4},
+		{"permissive → v4", mode.Permissive, reconcilerKindV4},
+		// Enforce/strict are rejected by validateMode before reaching
+		// reconcilerKindFor in production. The defensive fallback maps
+		// them to v3 so a future Phase 8 author has a clear hook —
+		// these cases lock that fallback contract.
+		{"enforce → v3 (rejected at startup)", mode.Enforce, reconcilerKindV3},
+		{"strict → v3 (rejected at startup)", mode.Strict, reconcilerKindV3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -142,15 +148,129 @@ func TestReconcilerKindFor(t *testing.T) {
 	}
 }
 
-// TestReconcilerKindFor_OnlyAuditRoutesToV4 is the inverse guard: the
-// v4 reconciler MUST NOT be selected for any mode other than audit. If
-// a future refactor accidentally routes permissive/enforce/strict into
-// the v4 path, this test catches it.
-func TestReconcilerKindFor_OnlyAuditRoutesToV4(t *testing.T) {
-	for _, m := range []mode.Mode{mode.Permissive, mode.Enforce, mode.Strict} {
-		if got := reconcilerKindFor(m); got == reconcilerKindV4Audit {
-			t.Errorf("mode %q must NOT route to %s (only audit may)", m.String(), reconcilerKindV4Audit)
+// TestReconcilerKindFor_V4RoutingContainsAuditAndPermissive is the
+// positive inverse of the old "only audit routes to v4" test. After
+// Patch 6.7-wire, permissive joined audit on the v4 path; this test
+// locks that membership. If a future refactor drops permissive from
+// the v4 set (e.g. accidentally falls back to v3), the assertion
+// fails loudly.
+func TestReconcilerKindFor_V4RoutingContainsAuditAndPermissive(t *testing.T) {
+	for _, m := range []mode.Mode{mode.Audit, mode.Permissive} {
+		if got := reconcilerKindFor(m); got != reconcilerKindV4 {
+			t.Errorf("mode %q must route to %s; got %s", m.String(), reconcilerKindV4, got)
 		}
+	}
+}
+
+// TestReconcilerSelection_V3NeverRunsForPermissive is the contract
+// the user explicitly requested: under no circumstance may permissive
+// fall through to the v3 chart-era PVCReconciler. A future refactor
+// that drops the runsV4Reconciler() == true branch for permissive
+// would trip this test before any cluster surface area is affected.
+func TestReconcilerSelection_V3NeverRunsForPermissive(t *testing.T) {
+	if got := reconcilerKindFor(mode.Permissive); got == reconcilerKindV3 {
+		t.Errorf("permissive routed to v3; got %s, want %s (the entire point of Patch 6.7-wire)", got, reconcilerKindV4)
+	}
+}
+
+// TestRunsV4Reconciler locks the runs-v4 predicate's contract: only
+// audit + permissive return true. Used by main()'s gates for backend
+// init, /audit HTTP server, and webhook skip.
+func TestRunsV4Reconciler(t *testing.T) {
+	cases := []struct {
+		m    mode.Mode
+		want bool
+	}{
+		{mode.Audit, true},
+		{mode.Permissive, true},
+		{mode.Enforce, false},
+		{mode.Strict, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.m.String(), func(t *testing.T) {
+			if got := runsV4Reconciler(tc.m); got != tc.want {
+				t.Errorf("runsV4Reconciler(%s) = %v, want %v", tc.m.String(), got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNeedsBackend locks the needs-backend predicate: returns true
+// only for modes that would run the v3 chart-era reconciler. Today
+// this is the inverse of runsV4Reconciler; the two predicates are
+// kept separate so a future v4 component that needs a backend hook
+// can decouple them without rewriting the routing logic.
+func TestNeedsBackend(t *testing.T) {
+	cases := []struct {
+		m    mode.Mode
+		want bool
+	}{
+		{mode.Audit, false},
+		{mode.Permissive, false},
+		{mode.Enforce, true},
+		{mode.Strict, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.m.String(), func(t *testing.T) {
+			if got := needsBackend(tc.m); got != tc.want {
+				t.Errorf("needsBackend(%s) = %v, want %v", tc.m.String(), got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPredicateInvariant_V4AndBackendAreOpposite is a paranoia check.
+// Today runsV4Reconciler == !needsBackend by construction. If a future
+// change accidentally double-negates one without the other, the
+// invariant breaks and this test catches it before the operator
+// binary ships with a torn routing contract.
+func TestPredicateInvariant_V4AndBackendAreOpposite(t *testing.T) {
+	for _, m := range []mode.Mode{mode.Audit, mode.Permissive, mode.Enforce, mode.Strict} {
+		if runsV4Reconciler(m) == needsBackend(m) {
+			t.Errorf("runsV4Reconciler(%s) and needsBackend(%s) must be opposite; both returned %v",
+				m.String(), m.String(), runsV4Reconciler(m))
+		}
+	}
+}
+
+// TestValidateMode locks the fail-fast contract for enforce/strict.
+// Audit + permissive must pass; enforce + strict must return an
+// error mentioning Phase 8 (so the operator who set the env var
+// gets an actionable signal in the pod log). The exact wording is
+// part of the contract — log scrapers can match on "Phase 8" to
+// alert on misconfigured deployments.
+func TestValidateMode(t *testing.T) {
+	cases := []struct {
+		name           string
+		m              mode.Mode
+		wantErr        bool
+		wantContainStr string
+	}{
+		{"audit accepted", mode.Audit, false, ""},
+		{"permissive accepted", mode.Permissive, false, ""},
+		{"enforce rejected with Phase 8 message", mode.Enforce, true, "Phase 8"},
+		{"strict rejected with Phase 8 message", mode.Strict, true, "Phase 8"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateMode(tc.m)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validateMode(%s) = nil; want error mentioning %q", tc.m.String(), tc.wantContainStr)
+				}
+				if !strings.Contains(err.Error(), tc.wantContainStr) {
+					t.Errorf("validateMode(%s) error = %q; want substring %q", tc.m.String(), err.Error(), tc.wantContainStr)
+				}
+				// The error MUST also mention the mode string so an
+				// operator reading the pod log can tell which mode
+				// was rejected.
+				if !strings.Contains(err.Error(), tc.m.String()) {
+					t.Errorf("validateMode(%s) error = %q; want substring %q (operator must see which mode was rejected)", tc.m.String(), err.Error(), tc.m.String())
+				}
+			} else if err != nil {
+				t.Errorf("validateMode(%s) = %v; want nil", tc.m.String(), err)
+			}
+		})
 	}
 }
 
@@ -162,8 +282,15 @@ func TestReconcilerKindFor_OnlyAuditRoutesToV4(t *testing.T) {
 // production audit path uses. Empty, so /audit returns a valid report
 // with zero entries — sufficient to exercise the mux.
 func emptyAuditStore() *controller.Store {
+	return emptyV4Store(mode.Audit)
+}
+
+// emptyV4Store is the mode-parametric variant. Tests that need to
+// exercise the permissive-routed /audit endpoint use this directly so
+// the report's operator_mode field reflects the running mode.
+func emptyV4Store(m mode.Mode) *controller.Store {
 	return controller.NewStore(
-		mode.Audit.String(),
+		m.String(),
 		naming.StrategyBareDst.String(),
 		naming.DefaultRepoSecretName,
 	)
@@ -354,5 +481,105 @@ func TestParseSystemNamespaces_DefaultsAreCanonicalNine(t *testing.T) {
 		if _, ok := want[ns]; !ok {
 			t.Errorf("unexpected default namespace %q; if intentional, update webhooks.yaml AND this test", ns)
 		}
+	}
+}
+
+// =============================================================================
+// Patch 6.7-wire: /audit HTTP server under permissive
+// =============================================================================
+//
+// Under permissive mode the /audit endpoint must be mounted just like
+// under audit mode, with the report's operator_mode field correctly
+// reflecting "permissive" so dashboards / log scrapers can tell which
+// mode the binary is running in. Legacy /exists and /metrics endpoints
+// must remain unmounted; the audit-mode tests above lock that for
+// audit, the cases below lock it for permissive.
+
+// TestNewV4HTTPServer_PermissiveReportsPermissiveOperatorMode confirms
+// the /audit JSON's operator_mode field reads "permissive" when the
+// Store is constructed from runtimeCfg.Mode=permissive (the wiring
+// main() does in Patch 6.7-wire).
+func TestNewV4HTTPServer_PermissiveReportsPermissiveOperatorMode(t *testing.T) {
+	srv := newAuditHTTPServer(testCfgPort(), emptyV4Store(mode.Permissive), slog.New(slog.DiscardHandler))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/audit", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("/audit status: got %d, want 200", rr.Code)
+	}
+	var report controller.ParityReport
+	if err := json.Unmarshal(rr.Body.Bytes(), &report); err != nil {
+		t.Fatalf("/audit body did not decode as ParityReport: %v\nbody: %s", err, rr.Body.String())
+	}
+	if report.OperatorMode != mode.Permissive.String() {
+		t.Errorf("operator_mode: got %q, want %q (the entire point of permissive routing to v4)",
+			report.OperatorMode, mode.Permissive.String())
+	}
+	// NamingStrategy + DefaultRepoSecret are the same defaults whether
+	// audit or permissive — main() does not vary these by mode.
+	if report.NamingStrategy != naming.StrategyBareDst.String() {
+		t.Errorf("naming_strategy: got %q, want %q", report.NamingStrategy, naming.StrategyBareDst.String())
+	}
+	if report.DefaultRepoSecret != naming.DefaultRepoSecretName {
+		t.Errorf("default_repo_secret: got %q, want %q", report.DefaultRepoSecret, naming.DefaultRepoSecretName)
+	}
+}
+
+// TestNewV4HTTPServer_PermissiveDoesNotMountLegacyExists confirms the
+// /exists endpoint stays off under permissive. v4 modes have no backend
+// initialized so the legacy handler cannot work; mounting it would
+// surface 503s or panics depending on how the handler is constructed.
+func TestNewV4HTTPServer_PermissiveDoesNotMountLegacyExists(t *testing.T) {
+	srv := newAuditHTTPServer(testCfgPort(), emptyV4Store(mode.Permissive), slog.New(slog.DiscardHandler))
+
+	for _, path := range []string{"/exists", "/exists/", "/exists/myapp/data"} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+			rr := httptest.NewRecorder()
+			srv.Handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusNotFound {
+				t.Errorf("%s status: got %d, want 404 (legacy /exists must not be mounted in v4 modes)", path, rr.Code)
+			}
+		})
+	}
+}
+
+// TestNewV4HTTPServer_PermissiveDoesNotMountMetrics confirms /metrics
+// is not double-mounted under permissive (controller-runtime exposes
+// its own /metrics on metricsAddr).
+func TestNewV4HTTPServer_PermissiveDoesNotMountMetrics(t *testing.T) {
+	srv := newAuditHTTPServer(testCfgPort(), emptyV4Store(mode.Permissive), slog.New(slog.DiscardHandler))
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("/metrics status: got %d, want 404 (manager owns /metrics)", rr.Code)
+	}
+}
+
+// TestNewV4HTTPServer_PermissiveBackendIndependent extends the
+// backend-free constructor test to permissive. If main() ever wires
+// a backend dependency into the v4 HTTP server for permissive (e.g.
+// by passing a non-nil bundle into newAuditHTTPServer), this test
+// catches the regression: the audit server takes only a Store, no
+// backend.
+func TestNewV4HTTPServer_PermissiveBackendIndependent(t *testing.T) {
+	cfg := &config.Config{Port: "8080"} // all backend fields zero
+	srv := newAuditHTTPServer(cfg, emptyV4Store(mode.Permissive), slog.New(slog.DiscardHandler))
+
+	if srv == nil {
+		t.Fatal("newAuditHTTPServer returned nil with backend-free permissive config")
+	}
+	if srv.Handler == nil {
+		t.Fatal("permissive v4 server has nil Handler")
+	}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/audit", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Errorf("backend-free permissive /audit status: got %d, want 200", rr.Code)
 	}
 }

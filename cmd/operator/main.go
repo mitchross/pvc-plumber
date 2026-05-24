@@ -53,20 +53,80 @@ import (
 // since they don't leave package main) so wiring tests can assert the
 // exact string runManager would pick for a given mode without standing
 // up a manager.
+//
+// Patch 6.7-wire renamed reconcilerKindV4Audit → reconcilerKindV4 to
+// match the new routing: permissive joins audit on the v4 reconciler
+// path, so a name that pins the kind to one mode is misleading.
 const (
-	reconcilerKindV3      = "v3"
-	reconcilerKindV4Audit = "v4-audit"
+	reconcilerKindV3 = "v3"
+	reconcilerKindV4 = "v4"
 )
 
 // reconcilerKindFor is the single source of truth for "which reconciler
-// runs in this mode." Audit mode runs the V4AuditReconciler exclusively;
-// every other mode keeps the existing v3 PVCReconciler path. Tested in
-// main_test.go so a future mode addition forces an explicit decision.
+// runs in this mode." Audit AND permissive route to the v4 reconciler
+// + executor pair (the executor's Mode-gated short-circuit keeps audit
+// observe-only); enforce and strict are rejected at startup by
+// validateMode and never reach this predicate, but if they ever do
+// they fall to v3 as a defensive default.
+//
+// Tested in main_test.go so a future mode addition forces an explicit
+// decision.
 func reconcilerKindFor(m mode.Mode) string {
-	if m == mode.Audit {
-		return reconcilerKindV4Audit
+	if runsV4Reconciler(m) {
+		return reconcilerKindV4
 	}
 	return reconcilerKindV3
+}
+
+// runsV4Reconciler reports whether the operator binary routes the
+// given mode to the v4 reconciler. Audit and permissive both run v4
+// (their executor behavior diverges via the reconciler's Mode field —
+// audit short-circuits, permissive applies the planner's ops with
+// ownership and GVK safety rails). Patch 6.7-wire is the patch that
+// added permissive to this set.
+//
+// Enforce and strict return false here, but in practice they never
+// reach this predicate — validateMode aborts the binary at startup
+// for those modes. The false return is the defensive fallback in
+// case validateMode is ever bypassed.
+func runsV4Reconciler(m mode.Mode) bool {
+	return m == mode.Audit || m == mode.Permissive
+}
+
+// needsBackend reports whether the operator binary must initialize
+// the Kopia/S3 backend bundle (legacy v3 reconciler dependency). The
+// v4 reconciler/executor only manages VolSync RS/RD via the embedded
+// controller-runtime client; it does not inspect Kopia, S3, or
+// RustFS, so v4-routed modes (audit + permissive) skip backend init
+// entirely. Currently the inverse of runsV4Reconciler — they would
+// diverge if a future v4 component needs a backend hook, hence the
+// separate predicate.
+func needsBackend(m mode.Mode) bool {
+	return !runsV4Reconciler(m)
+}
+
+// validateMode fails loudly for modes the operator binary cannot
+// honor today. Enforce and strict are reserved for Phase 8
+// admission/restore semantics; routing them to v3 would resurrect
+// the chart-era reconciler (forbidden by the Patch 6.7-wire scope),
+// and routing them to v4 with permissive-equivalent writes would
+// silently downgrade their stronger contract. The correct behavior
+// is fail-fast: crash the pod at startup with an unambiguous error
+// so the operator who set PVC_PLUMBER_MODE=enforce/strict sees
+// "this mode is not implemented yet" rather than a permissive-style
+// reconcile log.
+//
+// Returns nil for audit and permissive (the two supported v4-routed
+// modes) and an error wrapping the mode string otherwise.
+func validateMode(m mode.Mode) error {
+	switch m {
+	case mode.Audit, mode.Permissive:
+		return nil
+	case mode.Enforce, mode.Strict:
+		return fmt.Errorf("PVC_PLUMBER_MODE=%s is not supported in v4 yet; enforce/strict are reserved for Phase 8 admission/restore semantics", m.String())
+	default:
+		return fmt.Errorf("PVC_PLUMBER_MODE=%s is not a recognized mode", m.String())
+	}
 }
 
 // defaultSystemNamespaces is the canonical, deadlock-prevention namespace set
@@ -139,17 +199,34 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 
 	// Phase 2.5d: resolve runtime mode (PVC_PLUMBER_MODE → audit default)
-	// BEFORE config.Load() so that audit-mode startup can skip backend
-	// validation. The audit-mode binary must NOT depend on RustFS / Kopia
-	// / S3 / credential env vars to come up — config.LoadWithOptions
+	// BEFORE config.Load() so that v4-routed modes can skip backend
+	// validation. The v4 binary must NOT depend on RustFS / Kopia / S3 /
+	// credential env vars to come up — config.LoadWithOptions
 	// (SkipBackend=true) is the seam.
 	runtimeCfg, runtimeErr := runtimeconfig.Load()
+
+	// Patch 6.7-wire: fail-fast on modes the binary cannot honor today.
+	// Enforce and strict are Phase 8 (admission/restore semantics) and
+	// have no in-binary behavior yet; crashing here with a clear error
+	// beats silently routing them to v3 chart-era (forbidden) or to
+	// permissive-equivalent writes (a hidden contract downgrade). See
+	// validateMode for the full reasoning.
+	if err := validateMode(runtimeCfg.Mode); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
 
 	// slog drives the legacy HTTP server (cmd/pvc-plumber/main.go uses it);
 	// reuse the same JSON format and level resolution so logs look identical
 	// whether the operator binary or the legacy binary is running.
+	//
+	// SkipBackend gate: needsBackend now drives this, not WritesAllowed.
+	// The two differ for permissive — WritesAllowed=true (cluster writes
+	// happen via the executor) but needsBackend=false (no Kopia/S3
+	// inspection in the v4 path). Decoupling them is the core of Patch
+	// 6.7-wire.
 	cfg, err := config.LoadWithOptions(config.LoadOptions{
-		SkipBackend: !runtimeCfg.WritesAllowed(),
+		SkipBackend: !needsBackend(runtimeCfg.Mode),
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
@@ -198,34 +275,41 @@ func main() {
 	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Backend + cache + HTTP server are conditional. In audit mode the
-	// binary must NOT initialize Kopia / S3 / kopia-credentials, must NOT
-	// connect to RustFS, and must NOT serve the legacy /exists endpoint —
-	// the audit-mode promise is "binary starts cleanly even when the
-	// backup infrastructure is unreachable." Phase 2.5d of the v4 PRD.
+	// Backend + cache + HTTP server are conditional. In any v4-routed
+	// mode (audit + permissive as of Patch 6.7-wire) the binary must NOT
+	// initialize Kopia / S3 / kopia-credentials, must NOT connect to
+	// RustFS, and must NOT serve the legacy /exists endpoint — the v4
+	// promise is "binary starts cleanly even when the backup
+	// infrastructure is unreachable." Phase 2.5d of the v4 PRD,
+	// extended to permissive in Patch 6.7-wire.
 	//
 	// Anything that depends on `bundle` (HTTP server, cache re-warm loop,
 	// webhook handlers in runManager) is gated on the same condition.
 	var bundle *backendBundle
-	if runtimeCfg.WritesAllowed() {
+	if needsBackend(runtimeCfg.Mode) {
 		bundle, err = buildBackend(rootCtx, cfg, slogger)
 		if err != nil {
 			slogger.Error("backend init failed", "error", err)
 			os.Exit(1)
 		}
 	} else {
-		slogger.Info("audit mode: skipping backend init (Kopia / S3 / credentials)",
+		slogger.Info("v4 mode: skipping backend init (Kopia / S3 / credentials)",
 			"mode", runtimeCfg.Mode.String())
 	}
 
-	// In audit mode the V4AuditReconciler (registered inside runManager)
-	// and the /audit HTTP handler (mounted on auditSrv below) share one
-	// in-memory parity Store. Constructed up here so both subsystems
-	// receive the same instance — the reconciler writes parity entries,
-	// the handler serves them. In non-audit modes the store is left nil
-	// and no audit subsystem is wired.
+	// In any v4-routed mode (audit + permissive) the V4AuditReconciler
+	// (registered inside runManager) and the /audit HTTP handler
+	// (mounted on auditSrv below) share one in-memory parity Store.
+	// Constructed up here so both subsystems receive the same instance —
+	// the reconciler writes parity entries, the handler serves them.
+	// Modes that don't run v4 leave the store nil and no v4 HTTP
+	// subsystem is wired.
+	//
+	// The Store's operatorMode field is set from runtimeCfg.Mode so the
+	// /audit JSON response correctly reports operator_mode="permissive"
+	// when the binary is in permissive mode.
 	var auditStore *controller.Store
-	if runtimeCfg.Mode == mode.Audit {
+	if runsV4Reconciler(runtimeCfg.Mode) {
 		auditStore = controller.NewStore(
 			runtimeCfg.Mode.String(),
 			naming.StrategyBareDst.String(),
@@ -272,15 +356,17 @@ func main() {
 			})
 		}
 	} else {
-		slogger.Info("audit mode: legacy HTTP server (/exists) + cache re-warm loop NOT started")
+		slogger.Info("v4 mode: legacy HTTP server (/exists) + cache re-warm loop NOT started",
+			"mode", runtimeCfg.Mode.String())
 	}
 
-	// Audit-mode HTTP server. Backend-independent: serves only /audit
-	// (parity report), /healthz, /readyz. No /exists, no /metrics
-	// (controller-runtime exposes its own /metrics on metricsAddr).
-	// Bound to cfg.Port — same socket the legacy server uses in
-	// non-audit modes, so liveness/readiness probes don't have to know
-	// which mode the pod is running in.
+	// v4 HTTP server. Backend-independent: serves only /audit (parity
+	// report), /healthz, /readyz. No /exists, no /metrics (controller-
+	// runtime exposes its own /metrics on metricsAddr). Bound to
+	// cfg.Port — same socket the legacy server uses for non-v4 modes,
+	// so liveness/readiness probes don't have to know which mode the
+	// pod is running in. Mounted whenever runsV4Reconciler(mode) is
+	// true (audit + permissive today).
 	if auditStore != nil {
 		auditSrv := newAuditHTTPServer(cfg, auditStore, slogger)
 		g.Go(func() error {
@@ -404,18 +490,31 @@ func runManager(
 	// cluster — see internal/v4/auditclient.
 	reconcilerClient := auditclient.New(mgr.GetClient(), runtimeCfg.Mode, slogger)
 
-	// Reconciler selection. Audit mode runs ONLY V4AuditReconciler — the
-	// v3 PVCReconciler is not registered, so even an unintended Get on
-	// the audit-wrapped client can't trigger v3 ensure/update paths.
-	// Every other mode keeps the existing v3 path unchanged (Patch 5
-	// constraint: non-audit behavior must not shift during the audit
-	// rollout). reconcilerKindFor is the single source of truth for
+	// Reconciler selection. Audit and permissive both run V4AuditReconciler
+	// (the executor's Mode-gated short-circuit keeps audit observe-only) —
+	// the v3 PVCReconciler is not registered for either, so even an
+	// unintended Get on the audit-wrapped client can't trigger v3
+	// ensure/update paths. Enforce and strict are rejected by
+	// validateMode at startup and never reach this switch; the v3 path
+	// is retained in source for future Phase 8 admission/restore
+	// semantics. reconcilerKindFor is the single source of truth for
 	// this mapping — see top of file + main_test.go.
 	switch reconcilerKindFor(runtimeCfg.Mode) {
-	case reconcilerKindV4Audit:
+	case reconcilerKindV4:
 		if auditStore == nil {
-			return fmt.Errorf("audit mode requires a non-nil auditStore; main() must construct one")
+			return fmt.Errorf("v4-routed mode %q requires a non-nil auditStore; main() must construct one", runtimeCfg.Mode.String())
 		}
+		// TODO(patch-6.8 / pre-karakeep-canary): wire v4 builder/executor
+		// defaults (DefaultSnapshotClass, DefaultCacheCapacity,
+		// DefaultStorageClass, DefaultUID/GID/FSGroup) from config / env
+		// before flipping the live Talos cluster to PVC_PLUMBER_MODE=
+		// permissive. The current zero values are safe for audit
+		// (executor short-circuits) but would produce RS/RD with empty
+		// snapshot class / cache size if a permissive reconcile fires.
+		// The cutover runbook (Patch 6.8) must specify the required
+		// values and either wire them via runtimeconfig or pin them to
+		// constants in main.go. Until that lands, keep PVC_PLUMBER_MODE
+		// =audit on the live cluster.
 		if err := (&controller.V4AuditReconciler{
 			Client:            reconcilerClient,
 			Store:             auditStore,
@@ -423,10 +522,11 @@ func runManager(
 			DefaultRepoSecret: naming.DefaultRepoSecretName,
 			SystemNamespaces:  sysNs,
 			OperatorMode:      runtimeCfg.Mode.String(),
+			Mode:              runtimeCfg.Mode,
 		}).SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("setup V4AuditReconciler: %w", err)
 		}
-		slogger.Info("v4 audit reconciler registered (v3 reconciler NOT registered)",
+		slogger.Info("v4 reconciler registered (v3 reconciler NOT registered)",
 			"mode", runtimeCfg.Mode.String(),
 			"naming_strategy", naming.StrategyBareDst.String(),
 			"default_repo_secret", naming.DefaultRepoSecretName,
@@ -468,14 +568,21 @@ func runManager(
 	// handlers receive the same SystemNamespaces / shared cached backend,
 	// keeping behavior identical between reconcile and admission paths.
 	//
-	// Phase 2.5: skip registration entirely in audit mode. The binary is
-	// safe to deploy without a MutatingWebhookConfiguration /
-	// ValidatingWebhookConfiguration; if one is accidentally created
-	// against this audit-mode binary, the webhook server returns 404 for
-	// the unregistered routes so admission requests simply fall through
-	// to "not handled by this webhook" (kube-apiserver behavior depends on
-	// failurePolicy — but the binary itself contributes zero denials).
-	if runtimeCfg.WebhookRegistrationAllowed() {
+	// Patch 6.7-wire: skip registration entirely for any v4-routed mode
+	// (audit + permissive). The binary is safe to deploy without a
+	// MutatingWebhookConfiguration / ValidatingWebhookConfiguration; if
+	// one is accidentally created against this binary, the webhook
+	// server returns 404 for the unregistered routes so admission
+	// requests simply fall through to "not handled by this webhook"
+	// (kube-apiserver behavior depends on failurePolicy — but the
+	// binary itself contributes zero denials).
+	//
+	// Today this branch is effectively dead because validateMode
+	// rejects enforce/strict at startup and the surviving modes
+	// (audit + permissive) are both v4-routed. The condition stays
+	// defensive: when Phase 8 lands and enforce/strict gain admission
+	// semantics, this is the seam they'll re-engage.
+	if !runsV4Reconciler(runtimeCfg.Mode) && runtimeCfg.WebhookRegistrationAllowed() {
 		decoder := admission.NewDecoder(mgr.GetScheme())
 		hookSrv := mgr.GetWebhookServer()
 		hookSrv.Register("/mutate-v1-pvc", &webhook.Admission{
@@ -496,7 +603,7 @@ func runManager(
 			"mode", runtimeCfg.Mode.String(),
 			"paths", []string{"/mutate-v1-pvc", "/validate-v1-pvc"})
 	} else {
-		slogger.Info("admission webhooks NOT registered (audit mode)",
+		slogger.Info("admission webhooks NOT registered (v4-routed mode)",
 			"mode", runtimeCfg.Mode.String())
 	}
 
