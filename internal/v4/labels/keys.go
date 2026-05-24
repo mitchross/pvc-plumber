@@ -22,6 +22,28 @@ const (
 	// LabelTier declares the backup cadence: hourly | daily | weekly | manual | disabled.
 	// "disabled" tears down RS without removing RD (preserves restore-on-recreate).
 	LabelTier = "pvc-plumber.io/tier"
+
+	// LabelManageVolSync gates whether pvc-plumber may create / update /
+	// delete VolSync ReplicationSource and ReplicationDestination resources
+	// for this PVC. REQUIRED IN ADDITION to LabelEnabled for any write to
+	// happen. Missing or "false" means: the operator reports on the PVC
+	// (subject to LabelEnabled or the legacy backup label) but never
+	// writes child resources for it.
+	//
+	// Phase 6 of docs/pvc-plumber-v4-prd.md. The two-label model is the
+	// migration safety fuse: PRs that flip apps from `backup: hourly` to
+	// `pvc-plumber.io/enabled: "true"` can ship in audit mode without any
+	// chance of triggering ownership transfer. Operator-managed
+	// VolSync resources require a SECOND, explicit PR that adds this
+	// label and simultaneously removes inline RS/RD from Git.
+	//
+	// Strict parsing: "true" / "false" (case-insensitive, whitespace
+	// tolerated) are accepted; any other value is recorded in
+	// Spec.Errors and the field falls back to false. The strictness
+	// difference vs. LabelEnabled is deliberate — this label is a
+	// write fuse and silent acceptance of a typo would hide an
+	// operator misconfiguration.
+	LabelManageVolSync = "pvc-plumber.io/manage-volsync"
 )
 
 // New v4 namespaced annotations (per-PVC overrides + free-form metadata).

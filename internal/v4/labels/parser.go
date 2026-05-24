@@ -18,6 +18,15 @@ const (
 	tierStrDisabled = "disabled"
 )
 
+// String forms of boolean label values. Used by strict-parse paths in
+// this file and by tests; relocated from test scope so parser.go can
+// reference the same canonical values without duplicating the
+// literals.
+const (
+	labelTrue  = "true"
+	labelFalse = "false"
+)
+
 // Tier is the backup cadence declared on a PVC.
 type Tier int
 
@@ -129,6 +138,15 @@ type Spec struct {
 	LegacyTier Tier   // parsed from LegacyLabelBackup only; for migration reports
 	LegacyRaw  string // raw legacy "backup" label value, for events/logs
 
+	// ManageVolSync is the write-eligibility gate from LabelManageVolSync.
+	// True means: pvc-plumber MAY create/update/delete VolSync RS/RD for
+	// this PVC. False (default; label missing or explicitly "false")
+	// means: report only, never write. REQUIRED IN ADDITION to Enabled
+	// for any write to happen. The legacy `backup: hourly|daily` label
+	// must NEVER imply this — only the explicit
+	// `pvc-plumber.io/manage-volsync: "true"` label does.
+	ManageVolSync bool
+
 	// Backup-exempt.
 	ExemptKind   ExemptKind
 	ExemptReason string
@@ -171,6 +189,24 @@ func Parse(pvcLabels, pvcAnnotations map[string]string) Spec {
 	// LabelEnabled.
 	if v, ok := pvcLabels[LabelEnabled]; ok {
 		s.Enabled = strings.EqualFold(strings.TrimSpace(v), "true")
+	}
+
+	// LabelManageVolSync. Strict parsing — see keys.go for rationale.
+	// Only "true" / "false" (case-insensitive, whitespace tolerated) are
+	// accepted; any other value records a parse error and leaves the
+	// field at its zero value (false). The strictness difference vs.
+	// LabelEnabled is deliberate: this is a write fuse and silent
+	// acceptance of a typo would hide an operator misconfiguration.
+	if v, ok := pvcLabels[LabelManageVolSync]; ok {
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case labelTrue:
+			s.ManageVolSync = true
+		case labelFalse:
+			s.ManageVolSync = false
+		default:
+			s.Errors = append(s.Errors,
+				fmt.Errorf("%s: invalid value %q (expected true|false)", LabelManageVolSync, v))
+		}
 	}
 
 	// Legacy backup tier.

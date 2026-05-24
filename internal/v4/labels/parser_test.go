@@ -6,10 +6,11 @@ import (
 	"time"
 )
 
-// Test-scope constants.
+// Test-scope constants. The bool label values (labelTrue, labelFalse)
+// live in parser.go because the strict-parse path references them
+// too — keeping a single source of truth.
 const (
-	labelTrue  = "true"
-	labelFalse = "false"
+	testReasonNAS = "NAS-backed, non-snapshottable"
 )
 
 func TestParse_OptInSignals(t *testing.T) {
@@ -116,9 +117,9 @@ func TestParse_BackupExemptContract(t *testing.T) {
 		{
 			name:       "valid: exempt=true + FQ reason",
 			labels:     map[string]string{LegacyLabelBackupExempt: labelTrue},
-			anns:       map[string]string{LegacyAnnotationBackupExemptReasonFQ: "NAS-backed, non-snapshottable"},
+			anns:       map[string]string{LegacyAnnotationBackupExemptReasonFQ: testReasonNAS},
 			wantKind:   ExemptValid,
-			wantReason: "NAS-backed, non-snapshottable",
+			wantReason: testReasonNAS,
 		},
 		{
 			name:     "INVALID: exempt=true with no reason annotation at all",
@@ -370,7 +371,7 @@ func TestNamespaceHasPrivilegedMovers(t *testing.T) {
 		{name: "true lowercase", in: map[string]string{NamespacePrivilegedMoversLabel: labelTrue}, want: true},
 		{name: "True case", in: map[string]string{NamespacePrivilegedMoversLabel: "True"}, want: true},
 		{name: "TRUE upper", in: map[string]string{NamespacePrivilegedMoversLabel: "TRUE"}, want: true},
-		{name: "false", in: map[string]string{NamespacePrivilegedMoversLabel: "false"}, want: false},
+		{name: "false", in: map[string]string{NamespacePrivilegedMoversLabel: labelFalse}, want: false},
 		{name: "garbage", in: map[string]string{NamespacePrivilegedMoversLabel: "yes"}, want: false},
 		{name: "whitespace true", in: map[string]string{NamespacePrivilegedMoversLabel: "  true "}, want: true},
 	}
@@ -380,6 +381,164 @@ func TestNamespaceHasPrivilegedMovers(t *testing.T) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestParse_ManageVolSync covers the Patch 6.1 contract: the new
+// `pvc-plumber.io/manage-volsync` label is parsed strictly, never
+// inferred from legacy / enabled labels, and is required (with Enabled)
+// for any write to happen. Planner enforcement of those interactions
+// lives in later patches; this test only proves the parser shape.
+func TestParse_ManageVolSync(t *testing.T) {
+	cases := []struct {
+		name              string
+		labels            map[string]string
+		anns              map[string]string
+		wantEnabled       bool
+		wantManageVolSync bool
+		wantOrigin        Origin
+		wantExemptKind    ExemptKind
+		wantErrs          int
+	}{
+		// --- Bare parsing of the new label ---
+		{
+			name:       "missing manage-volsync → false, no error",
+			wantOrigin: OriginNone,
+		},
+		{
+			name:              "manage-volsync=true → true, no error",
+			labels:            map[string]string{LabelManageVolSync: labelTrue},
+			wantManageVolSync: true,
+			wantOrigin:        OriginNone, // not an opt-in by itself
+		},
+		{
+			name:       "manage-volsync=false explicit → false, no error",
+			labels:     map[string]string{LabelManageVolSync: labelFalse},
+			wantOrigin: OriginNone,
+		},
+		{
+			name:       "manage-volsync=garbage → error, field stays false",
+			labels:     map[string]string{LabelManageVolSync: "yes"},
+			wantOrigin: OriginNone,
+			wantErrs:   1,
+		},
+		{
+			name:       "manage-volsync=empty string → error, field stays false (typo detection)",
+			labels:     map[string]string{LabelManageVolSync: ""},
+			wantOrigin: OriginNone,
+			wantErrs:   1,
+		},
+		{
+			name:              "manage-volsync=True (case-insensitive)",
+			labels:            map[string]string{LabelManageVolSync: "True"},
+			wantManageVolSync: true,
+			wantOrigin:        OriginNone,
+		},
+		{
+			name:              "manage-volsync=TRUE (uppercase)",
+			labels:            map[string]string{LabelManageVolSync: "TRUE"},
+			wantManageVolSync: true,
+			wantOrigin:        OriginNone,
+		},
+		{
+			name:              "manage-volsync=  true  (whitespace tolerated)",
+			labels:            map[string]string{LabelManageVolSync: "  true  "},
+			wantManageVolSync: true,
+			wantOrigin:        OriginNone,
+		},
+		{
+			name:       "manage-volsync=False (case-insensitive false)",
+			labels:     map[string]string{LabelManageVolSync: "False"},
+			wantOrigin: OriginNone,
+		},
+
+		// --- Interaction with other opt-in labels (write-gate INDEPENDENCE) ---
+		{
+			name:              "enabled=true WITHOUT manage-volsync → opt-in but not write-eligible",
+			labels:            map[string]string{LabelEnabled: labelTrue},
+			wantEnabled:       true,
+			wantManageVolSync: false,
+			wantOrigin:        OriginNew,
+		},
+		{
+			name:              "legacy backup label WITHOUT manage-volsync → audit opt-in but write-gate stays off",
+			labels:            map[string]string{LegacyLabelBackup: tierStrHourly},
+			wantManageVolSync: false,
+			wantOrigin:        OriginLegacyOnly,
+		},
+		{
+			name:              "legacy backup label PLUS manage-volsync=true → parser allows it; planner must still NOT write (legacy-only is not write-eligible)",
+			labels:            map[string]string{LegacyLabelBackup: tierStrDaily, LabelManageVolSync: labelTrue},
+			wantManageVolSync: true,
+			wantOrigin:        OriginLegacyOnly, // legacy alone does not flip to OriginNew
+		},
+		{
+			name:              "enabled=true + manage-volsync=true → fully write-eligible at the parser level",
+			labels:            map[string]string{LabelEnabled: labelTrue, LabelManageVolSync: labelTrue},
+			wantEnabled:       true,
+			wantManageVolSync: true,
+			wantOrigin:        OriginNew,
+		},
+		{
+			name:              "enabled=true + manage-volsync=false → opt-in, writes explicitly disabled",
+			labels:            map[string]string{LabelEnabled: labelTrue, LabelManageVolSync: labelFalse},
+			wantEnabled:       true,
+			wantManageVolSync: false,
+			wantOrigin:        OriginNew,
+		},
+
+		// --- Backup-exempt parses cleanly alongside manage-volsync; planner enforces precedence ---
+		{
+			name:   "backup-exempt + manage-volsync=true parses cleanly (planner must skip writes)",
+			labels: map[string]string{LegacyLabelBackupExempt: labelTrue, LabelManageVolSync: labelTrue},
+			anns: map[string]string{
+				LegacyAnnotationBackupExemptReasonFQ: testReasonNAS,
+			},
+			wantManageVolSync: true,
+			wantOrigin:        OriginNone,
+			wantExemptKind:    ExemptValid,
+		},
+		{
+			name:              "all three: enabled + manage-volsync + backup-exempt parses cleanly (planner must skip writes)",
+			labels:            map[string]string{LabelEnabled: labelTrue, LabelManageVolSync: labelTrue, LegacyLabelBackupExempt: labelTrue},
+			anns:              map[string]string{LegacyAnnotationBackupExemptReasonFQ: "NAS"},
+			wantEnabled:       true,
+			wantManageVolSync: true,
+			wantOrigin:        OriginNew,
+			wantExemptKind:    ExemptValid,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := Parse(tc.labels, tc.anns)
+			if s.Enabled != tc.wantEnabled {
+				t.Errorf("Enabled: got %v, want %v", s.Enabled, tc.wantEnabled)
+			}
+			if s.ManageVolSync != tc.wantManageVolSync {
+				t.Errorf("ManageVolSync: got %v, want %v", s.ManageVolSync, tc.wantManageVolSync)
+			}
+			if s.Origin != tc.wantOrigin {
+				t.Errorf("Origin: got %v, want %v", s.Origin, tc.wantOrigin)
+			}
+			if s.ExemptKind != tc.wantExemptKind {
+				t.Errorf("ExemptKind: got %v, want %v", s.ExemptKind, tc.wantExemptKind)
+			}
+			if len(s.Errors) != tc.wantErrs {
+				t.Errorf("Errors: got %d (%v), want %d", len(s.Errors), s.Errors, tc.wantErrs)
+			}
+		})
+	}
+}
+
+// TestParse_ManageVolSync_ZeroValueDefault is a paranoia guard: the
+// Spec zero value must have ManageVolSync=false. A future struct
+// reorder or default-flip is the kind of single-character mistake
+// that would silently re-enable writes on every PVC. Catch it here.
+func TestParse_ManageVolSync_ZeroValueDefault(t *testing.T) {
+	var s Spec
+	if s.ManageVolSync {
+		t.Fatal("Spec{} zero value has ManageVolSync=true; write-gate must default to false")
 	}
 }
 
