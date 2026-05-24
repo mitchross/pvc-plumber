@@ -33,6 +33,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -212,6 +213,21 @@ func main() {
 	// permissive-equivalent writes (a hidden contract downgrade). See
 	// validateMode for the full reasoning.
 	if err := validateMode(runtimeCfg.Mode); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	// Patch 6.8a: in permissive mode, fail-fast when any of the six
+	// PVC_PLUMBER_DEFAULT_* env vars are missing or set to a value the
+	// v4 builder can't safely render (empty string, UID/GID/FSGroup =
+	// 0). The alternative — silently emitting RS/RD with empty
+	// snapshot class or root-owned mover Pods — would surface as a
+	// failed first backup in the karakeep canary that's hard to
+	// diagnose. Audit-mode binaries skip this check entirely (the
+	// executor short-circuits, so default values never reach the
+	// cluster). See runtimeconfig.RequireV4WriteDefaults for the
+	// complete contract.
+	if err := runtimeconfig.RequireV4WriteDefaults(runtimeCfg); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
@@ -504,26 +520,14 @@ func runManager(
 		if auditStore == nil {
 			return fmt.Errorf("v4-routed mode %q requires a non-nil auditStore; main() must construct one", runtimeCfg.Mode.String())
 		}
-		// TODO(patch-6.8 / pre-karakeep-canary): wire v4 builder/executor
-		// defaults (DefaultSnapshotClass, DefaultCacheCapacity,
-		// DefaultStorageClass, DefaultUID/GID/FSGroup) from config / env
-		// before flipping the live Talos cluster to PVC_PLUMBER_MODE=
-		// permissive. The current zero values are safe for audit
-		// (executor short-circuits) but would produce RS/RD with empty
-		// snapshot class / cache size if a permissive reconcile fires.
-		// The cutover runbook (Patch 6.8) must specify the required
-		// values and either wire them via runtimeconfig or pin them to
-		// constants in main.go. Until that lands, keep PVC_PLUMBER_MODE
-		// =audit on the live cluster.
-		if err := (&controller.V4AuditReconciler{
-			Client:            reconcilerClient,
-			Store:             auditStore,
-			NamingStrategy:    naming.StrategyBareDst,
-			DefaultRepoSecret: naming.DefaultRepoSecretName,
-			SystemNamespaces:  sysNs,
-			OperatorMode:      runtimeCfg.Mode.String(),
-			Mode:              runtimeCfg.Mode,
-		}).SetupWithManager(mgr); err != nil {
+		// Patch 6.8a: builder/executor defaults arrive via runtimeCfg.
+		// In permissive mode RequireV4WriteDefaults (called in main())
+		// has already validated that every field is set + non-zero;
+		// here we trust the validator and pass through. In audit mode
+		// the fields may be zero / nil and the executor short-circuits
+		// anyway, so the pass-through is harmless.
+		v4rec := newV4Reconciler(reconcilerClient, auditStore, sysNs, runtimeCfg)
+		if err := v4rec.SetupWithManager(mgr); err != nil {
 			return fmt.Errorf("setup V4AuditReconciler: %w", err)
 		}
 		slogger.Info("v4 reconciler registered (v3 reconciler NOT registered)",
@@ -531,6 +535,12 @@ func runManager(
 			"naming_strategy", naming.StrategyBareDst.String(),
 			"default_repo_secret", naming.DefaultRepoSecretName,
 			"system_namespaces", len(sysNs),
+			"default_snapshot_class", runtimeCfg.DefaultSnapshotClass,
+			"default_cache_capacity", runtimeCfg.DefaultCacheCapacity,
+			"default_storage_class", runtimeCfg.DefaultStorageClass,
+			"default_uid", int64OrZero(runtimeCfg.DefaultUID),
+			"default_gid", int64OrZero(runtimeCfg.DefaultGID),
+			"default_fsgroup", int64OrZero(runtimeCfg.DefaultFSGroup),
 		)
 
 	default:
@@ -653,6 +663,58 @@ func systemNamespacesForLog(set map[string]struct{}) []string {
 		out = append(out, ns)
 	}
 	return out
+}
+
+// newV4Reconciler is the factory for V4AuditReconciler used by
+// runManager. Extracted out of the inline construction site so the
+// defaults-wiring contract (Patch 6.8a) is independently unit-testable
+// without standing up a controller-runtime manager: a test can call
+// newV4Reconciler with a runtimeconfig.Config and assert the
+// reconciler's fields match the config's. Trust-but-verify for the
+// permissive cutover.
+//
+// Pre-conditions when called from runManager:
+//   - mode is one of {audit, permissive} (validateMode has rejected
+//     enforce/strict)
+//   - if mode is permissive, RequireV4WriteDefaults has succeeded
+//     (every default field is set + UID/GID/FSGroup > 0)
+//
+// In audit mode the defaults may be nil/zero and that's fine —
+// V4AuditReconciler's executor short-circuits, so the zero values
+// never reach the cluster.
+func newV4Reconciler(
+	c client.Client,
+	store *controller.Store,
+	sysNs map[string]struct{},
+	runtimeCfg runtimeconfig.Config,
+) *controller.V4AuditReconciler {
+	return &controller.V4AuditReconciler{
+		Client:               c,
+		Store:                store,
+		NamingStrategy:       naming.StrategyBareDst,
+		DefaultRepoSecret:    naming.DefaultRepoSecretName,
+		SystemNamespaces:     sysNs,
+		OperatorMode:         runtimeCfg.Mode.String(),
+		Mode:                 runtimeCfg.Mode,
+		DefaultSnapshotClass: runtimeCfg.DefaultSnapshotClass,
+		DefaultCacheCapacity: runtimeCfg.DefaultCacheCapacity,
+		DefaultStorageClass:  runtimeCfg.DefaultStorageClass,
+		DefaultUID:           int64OrZero(runtimeCfg.DefaultUID),
+		DefaultGID:           int64OrZero(runtimeCfg.DefaultGID),
+		DefaultFSGroup:       int64OrZero(runtimeCfg.DefaultFSGroup),
+	}
+}
+
+// int64OrZero dereferences a *int64, returning 0 when the pointer is
+// nil. Used to bridge runtimeconfig's "explicit zero vs unset"
+// distinction (Patch 6.8a) into the reconciler's plain int64 fields.
+// Validation that the value is non-zero in permissive mode happens
+// upstream in runtimeconfig.RequireV4WriteDefaults, not here.
+func int64OrZero(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // buildSlogger mirrors cmd/pvc-plumber/main.go's logger construction so

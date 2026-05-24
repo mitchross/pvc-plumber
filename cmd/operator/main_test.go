@@ -13,12 +13,23 @@ import (
 	"github.com/mitchross/pvc-plumber/internal/controller"
 	"github.com/mitchross/pvc-plumber/internal/v4/mode"
 	"github.com/mitchross/pvc-plumber/internal/v4/naming"
+	"github.com/mitchross/pvc-plumber/internal/v4/runtimeconfig"
 )
 
 // testStagingNS is the example site-local namespace used across the additive-
 // behavior subtests. Realistic shape (lowercase, dashed) is enough to catch
 // the trim/split cases without needing variety per case.
 const testStagingNS = "staging-infra"
+
+// Test-scope constants for Patch 6.8a permissive-defaults assertions.
+// Mirrors the runtimeconfig package's test constants so the operator
+// test can use the same canonical values without exporting them.
+const (
+	testMainSnapshotClass = "longhorn-snapclass"
+	testMainCacheCapacity = "2Gi"
+	testMainStorageClass  = "longhorn"
+	testMainKubeSystemNS  = "kube-system"
+)
 
 // TestParseSystemNamespaces_AlwaysSeedsDefaults locks in the load-bearing
 // invariant from S2: the 9-entry defaultSystemNamespaces list must always be
@@ -581,5 +592,211 @@ func TestNewV4HTTPServer_PermissiveBackendIndependent(t *testing.T) {
 	srv.Handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Errorf("backend-free permissive /audit status: got %d, want 200", rr.Code)
+	}
+}
+
+// =============================================================================
+// Patch 6.8a: V4 builder defaults flow from runtimeconfig into the reconciler
+// =============================================================================
+
+// int64TestPtr is the test-local equivalent of runtimeconfig.int64Ptr
+// (the runtimeconfig package's helper is private). Used to build
+// runtimeconfig.Config fixtures inline.
+func int64TestPtr(v int64) *int64 { return &v }
+
+// TestInt64OrZero locks the nil-deref behavior of the small helper
+// that bridges runtimeconfig.Config (*int64) into the reconciler's
+// flat int64 fields. Trivial logic, but explicit so a future refactor
+// that changes the helper to "return -1 for nil" trips a clear test.
+func TestInt64OrZero(t *testing.T) {
+	if got := int64OrZero(nil); got != 0 {
+		t.Errorf("int64OrZero(nil) = %d, want 0", got)
+	}
+	v := int64(568)
+	if got := int64OrZero(&v); got != 568 {
+		t.Errorf("int64OrZero(&568) = %d, want 568", got)
+	}
+	zero := int64(0)
+	if got := int64OrZero(&zero); got != 0 {
+		t.Errorf("int64OrZero(&0) = %d, want 0", got)
+	}
+	neg := int64(-1)
+	if got := int64OrZero(&neg); got != -1 {
+		// Validator rejects negative at parse; helper itself passes
+		// through. Locking the pass-through behavior.
+		t.Errorf("int64OrZero(&-1) = %d, want -1 (validation belongs elsewhere)", got)
+	}
+}
+
+// TestNewV4Reconciler_PassesPermissiveDefaults is the core
+// contract-locking test for Patch 6.8a: given a runtimeconfig.Config
+// with permissive-mode defaults set, the constructed reconciler's
+// Default* fields match verbatim. Without this test, a typo in the
+// factory's field assignments would silently render karakeep RS/RD
+// with the wrong UID/storage class/snapshot class.
+func TestNewV4Reconciler_PassesPermissiveDefaults(t *testing.T) {
+	cfg := runtimeconfig.Config{
+		Mode:                 mode.Permissive,
+		DefaultSnapshotClass: testMainSnapshotClass,
+		DefaultCacheCapacity: testMainCacheCapacity,
+		DefaultStorageClass:  testMainStorageClass,
+		DefaultUID:           int64TestPtr(568),
+		DefaultGID:           int64TestPtr(568),
+		DefaultFSGroup:       int64TestPtr(568),
+	}
+	sysNs := map[string]struct{}{testMainKubeSystemNS: {}}
+	store := emptyV4Store(mode.Permissive)
+
+	r := newV4Reconciler(nil, store, sysNs, cfg)
+	if r == nil {
+		t.Fatal("newV4Reconciler returned nil")
+	}
+	if r.Mode != mode.Permissive {
+		t.Errorf("Mode: got %v, want %v", r.Mode, mode.Permissive)
+	}
+	if r.OperatorMode != mode.Permissive.String() {
+		t.Errorf("OperatorMode: got %q, want %q", r.OperatorMode, mode.Permissive.String())
+	}
+	if r.NamingStrategy != naming.StrategyBareDst {
+		t.Errorf("NamingStrategy: got %v, want %v", r.NamingStrategy, naming.StrategyBareDst)
+	}
+	if r.DefaultRepoSecret != naming.DefaultRepoSecretName {
+		t.Errorf("DefaultRepoSecret: got %q, want %q", r.DefaultRepoSecret, naming.DefaultRepoSecretName)
+	}
+	if r.Store != store {
+		t.Error("Store reference: factory must pass through the caller's store, not allocate a new one")
+	}
+	if r.DefaultSnapshotClass != testMainSnapshotClass {
+		t.Errorf("DefaultSnapshotClass: got %q, want %s", r.DefaultSnapshotClass, testMainSnapshotClass)
+	}
+	if r.DefaultCacheCapacity != testMainCacheCapacity {
+		t.Errorf("DefaultCacheCapacity: got %q, want %s", r.DefaultCacheCapacity, testMainCacheCapacity)
+	}
+	if r.DefaultStorageClass != testMainStorageClass {
+		t.Errorf("DefaultStorageClass: got %q, want %s", r.DefaultStorageClass, testMainStorageClass)
+	}
+	if r.DefaultUID != 568 {
+		t.Errorf("DefaultUID: got %d, want 568", r.DefaultUID)
+	}
+	if r.DefaultGID != 568 {
+		t.Errorf("DefaultGID: got %d, want 568", r.DefaultGID)
+	}
+	if r.DefaultFSGroup != 568 {
+		t.Errorf("DefaultFSGroup: got %d, want 568", r.DefaultFSGroup)
+	}
+	if _, ok := r.SystemNamespaces[testMainKubeSystemNS]; !ok {
+		t.Error("SystemNamespaces: kube-system missing from factory output")
+	}
+}
+
+// TestNewV4Reconciler_AuditWithUnsetDefaults_RendersZeros mirrors the
+// audit-mode invariant: nil pointers in runtimeconfig.Config flatten to
+// 0 on the reconciler. The executor short-circuits in audit so these
+// zeros never leave the process, but the contract that nil pointer →
+// 0 int64 is locked here for the audit path.
+func TestNewV4Reconciler_AuditWithUnsetDefaults_RendersZeros(t *testing.T) {
+	cfg := runtimeconfig.Config{Mode: mode.Audit} // all default fields nil/empty
+	r := newV4Reconciler(nil, emptyV4Store(mode.Audit), nil, cfg)
+
+	if r.Mode != mode.Audit {
+		t.Errorf("Mode: got %v, want audit", r.Mode)
+	}
+	if r.DefaultSnapshotClass != "" {
+		t.Errorf("DefaultSnapshotClass: got %q, want empty", r.DefaultSnapshotClass)
+	}
+	if r.DefaultUID != 0 {
+		t.Errorf("DefaultUID: got %d, want 0 (nil pointer derefs to 0)", r.DefaultUID)
+	}
+	if r.DefaultGID != 0 {
+		t.Errorf("DefaultGID: got %d, want 0", r.DefaultGID)
+	}
+	if r.DefaultFSGroup != 0 {
+		t.Errorf("DefaultFSGroup: got %d, want 0", r.DefaultFSGroup)
+	}
+}
+
+// TestNewV4Reconciler_PartialDefaults_AuditAllowed: audit-mode
+// reconcilers can be constructed with any combination of set/unset
+// defaults. (Permissive's hard-validation is upstream in
+// RequireV4WriteDefaults, not in the factory.) This test pins that
+// the factory does not double-validate.
+func TestNewV4Reconciler_PartialDefaults_AuditAllowed(t *testing.T) {
+	cfg := runtimeconfig.Config{
+		Mode:                 mode.Audit,
+		DefaultSnapshotClass: testMainSnapshotClass, // only one field set
+	}
+	r := newV4Reconciler(nil, emptyV4Store(mode.Audit), nil, cfg)
+	if r == nil {
+		t.Fatal("factory rejected partial-defaults audit config; must accept")
+	}
+	if r.DefaultSnapshotClass != testMainSnapshotClass {
+		t.Errorf("DefaultSnapshotClass: got %q, want %s", r.DefaultSnapshotClass, testMainSnapshotClass)
+	}
+	if r.DefaultStorageClass != "" {
+		t.Errorf("DefaultStorageClass: got %q, want empty (audit tolerates unset)", r.DefaultStorageClass)
+	}
+}
+
+// =============================================================================
+// Patch 6.8a: RequireV4WriteDefaults integration smoke test
+// =============================================================================
+//
+// runtimeconfig.RequireV4WriteDefaults has its own exhaustive unit
+// tests in internal/v4/runtimeconfig/config_test.go. The integration
+// test below proves only that main()'s contract — "permissive
+// requires the six env vars; audit doesn't" — is wired correctly at
+// the boundary. If a future refactor inverts the wiring (e.g. calls
+// the validator in audit mode), this test fails before any cluster
+// deployment.
+
+// TestMainIntegration_RequireV4WriteDefaults_AuditNeverErrors mirrors
+// the runtimeconfig audit case but called as the binary would: import
+// the package, run the validator on an audit Config, assert no error.
+func TestMainIntegration_RequireV4WriteDefaults_AuditNeverErrors(t *testing.T) {
+	cfg := runtimeconfig.Config{Mode: mode.Audit} // every default unset
+	if err := runtimeconfig.RequireV4WriteDefaults(cfg); err != nil {
+		t.Errorf("RequireV4WriteDefaults(audit) = %v, want nil (audit tolerates missing defaults)", err)
+	}
+}
+
+// TestMainIntegration_RequireV4WriteDefaults_PermissiveAllSetOK locks
+// the happy path the karakeep canary deployment will take.
+func TestMainIntegration_RequireV4WriteDefaults_PermissiveAllSetOK(t *testing.T) {
+	cfg := runtimeconfig.Config{
+		Mode:                 mode.Permissive,
+		DefaultSnapshotClass: testMainSnapshotClass,
+		DefaultCacheCapacity: testMainCacheCapacity,
+		DefaultStorageClass:  testMainStorageClass,
+		DefaultUID:           int64TestPtr(568),
+		DefaultGID:           int64TestPtr(568),
+		DefaultFSGroup:       int64TestPtr(568),
+	}
+	if err := runtimeconfig.RequireV4WriteDefaults(cfg); err != nil {
+		t.Errorf("RequireV4WriteDefaults(permissive, all set) = %v, want nil", err)
+	}
+}
+
+// TestMainIntegration_RequireV4WriteDefaults_PermissiveMissingAny is
+// the load-bearing case for the canary: missing any default must
+// produce an error referencing the specific env var so the operator's
+// log line is actionable.
+func TestMainIntegration_RequireV4WriteDefaults_PermissiveMissingAny(t *testing.T) {
+	cfg := runtimeconfig.Config{Mode: mode.Permissive} // every default unset
+	err := runtimeconfig.RequireV4WriteDefaults(cfg)
+	if err == nil {
+		t.Fatal("permissive with no defaults: got nil, want error")
+	}
+	// All six env var names must appear in the composite error.
+	for _, key := range []string{
+		runtimeconfig.EnvDefaultSnapshotClass,
+		runtimeconfig.EnvDefaultCacheCapacity,
+		runtimeconfig.EnvDefaultStorageClass,
+		runtimeconfig.EnvDefaultUID,
+		runtimeconfig.EnvDefaultGID,
+		runtimeconfig.EnvDefaultFSGroup,
+	} {
+		if !strings.Contains(err.Error(), key) {
+			t.Errorf("composite error missing %s; got %q", key, err.Error())
+		}
 	}
 }
