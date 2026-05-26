@@ -1,7 +1,8 @@
-.PHONY: build test lint docker-build docker-push run clean help
+.PHONY: build build-adopt test lint docker-build docker-push run clean help
 
 # Variables
 BINARY_NAME=pvc-plumber
+ADOPT_BINARY_NAME=pvc-plumber-adopt
 DOCKER_IMAGE=ghcr.io/mitchross/pvc-plumber
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS=-ldflags "-X main.version=$(VERSION)"
@@ -9,10 +10,15 @@ LDFLAGS=-ldflags "-X main.version=$(VERSION)"
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
-build: ## Build binary locally
+build: ## Build operator binary locally
 	@echo "Building $(BINARY_NAME)..."
 	CGO_ENABLED=0 go build -a -installsuffix cgo $(LDFLAGS) -o $(BINARY_NAME) ./cmd/operator
 	@echo "Built $(BINARY_NAME)"
+
+build-adopt: ## Build pvc-plumber-adopt CLI binary (cmd/adopt)
+	@echo "Building $(ADOPT_BINARY_NAME)..."
+	CGO_ENABLED=0 go build -a -installsuffix cgo $(LDFLAGS) -o $(ADOPT_BINARY_NAME) ./cmd/adopt
+	@echo "Built $(ADOPT_BINARY_NAME)"
 
 test: ## Run tests with coverage
 	@echo "Running tests..."
