@@ -2,7 +2,7 @@
 FROM kopia/kopia:latest AS kopia
 
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 
 ARG TARGETARCH
 
@@ -19,6 +19,9 @@ COPY . .
 # webhooks). See Dockerfile for the full rationale.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o pvc-plumber ./cmd/operator
 
+# Build the metadata-only adopt CLI for debug-image parity with Dockerfile.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o pvc-plumber-adopt ./cmd/adopt
+
 # Final stage - with shell for debugging
 FROM alpine:3.21
 
@@ -28,6 +31,9 @@ WORKDIR /
 
 # Copy pvc-plumber binary
 COPY --from=builder /build/pvc-plumber /pvc-plumber
+
+# Copy pvc-plumber-adopt CLI binary (debug-image parity with Dockerfile).
+COPY --from=builder /build/pvc-plumber-adopt /pvc-plumber-adopt
 
 # Copy kopia binary
 COPY --from=kopia /bin/kopia /usr/local/bin/kopia

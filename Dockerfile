@@ -22,6 +22,11 @@ COPY . .
 # regression that left the cluster's webhook server dead.
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o pvc-plumber ./cmd/operator
 
+# Build the metadata-only adopt CLI alongside the operator. Shipping in the
+# same image lets operators invoke it via `kubectl run --image=...
+# --command -- /pvc-plumber-adopt ...` without a separate image pull.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -a -installsuffix cgo -ldflags '-extldflags "-static"' -o pvc-plumber-adopt ./cmd/adopt
+
 # Final stage - use alpine for kopia compatibility
 FROM alpine:3.21
 
@@ -31,6 +36,10 @@ WORKDIR /
 
 # Copy pvc-plumber binary
 COPY --from=builder /build/pvc-plumber /pvc-plumber
+
+# Copy pvc-plumber-adopt CLI binary. Not the default ENTRYPOINT — operators
+# invoke it explicitly via `kubectl run --command -- /pvc-plumber-adopt ...`.
+COPY --from=builder /build/pvc-plumber-adopt /pvc-plumber-adopt
 
 # Copy kopia binary
 COPY --from=kopia /bin/kopia /usr/local/bin/kopia

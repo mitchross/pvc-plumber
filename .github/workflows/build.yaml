@@ -76,6 +76,9 @@ jobs:
     - name: Build binary
       run: CGO_ENABLED=0 go build -v -o pvc-plumber ./cmd/operator
 
+    - name: Build adopt CLI binary
+      run: CGO_ENABLED=0 go build -v -o pvc-plumber-adopt ./cmd/adopt
+
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
 
