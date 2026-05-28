@@ -113,6 +113,7 @@ func BuildRS(in Inputs) *unstructured.Unstructured {
 	rs.SetNamespace(in.Namespace)
 	rs.SetName(in.PVCName) // RS name is the PVC name verbatim (bare-dst convention)
 	rs.SetLabels(commonLabels(in))
+	rs.SetAnnotations(commonAnnotations(in))
 
 	identity := naming.IdentityFor(in.Namespace, in.PVCName, in.Spec.BackupIdentity)
 	kopia := map[string]interface{}{
@@ -156,6 +157,7 @@ func BuildRD(in Inputs) *unstructured.Unstructured {
 	rd.SetNamespace(in.Namespace)
 	rd.SetName(in.PVCName + "-dst") // RD name is `<pvc>-dst` (bare-dst convention)
 	rd.SetLabels(commonLabels(in))
+	rd.SetAnnotations(commonAnnotations(in))
 
 	identity := naming.IdentityFor(in.Namespace, in.PVCName, in.Spec.BackupIdentity)
 
@@ -195,25 +197,42 @@ func BuildRD(in Inputs) *unstructured.Unstructured {
 // commonLabels are stamped onto both RS and RD. These are the
 // operator's identity stamp — the planner uses them to distinguish
 // operator-owned resources from inline-Argo or unmanaged ones.
+//
+// Every value below must individually pass Kubernetes label-value
+// validation (regex `(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?`).
+// Compound identities containing '/' belong in annotations, NOT
+// labels — see commonAnnotations and the 2026-05-28 nginx-example
+// canary incident write-up in the talos-argocd-proxmox repo
+// (docs/pvc-plumber-v4-nginx-canary-incident.md).
 func commonLabels(in Inputs) map[string]string {
 	out := map[string]string{
 		labels.LabelManagedByKey:    labels.LabelManagedByValue,
 		labels.LabelSourceNamespace: in.Namespace,
 		labels.LabelSourcePVC:       in.PVCName,
 		labels.LabelTierOnChild:     in.Spec.Tier.String(),
-		labels.LabelBackupIdentity:  backupIdentityLabel(in),
 		"volsync.backup/pvc":        in.PVCName, // matches the inline RS/RD convention in the talos repo
 	}
 	return out
 }
 
-// backupIdentityLabel returns the value used for the
-// pvc-plumber.io/backup-identity label on RS/RD children. If the PVC
-// declared an override via annotation, that wins verbatim; otherwise
-// the default <namespace>/<pvc> form. Mirrors naming.IdentityFor's
-// override behavior so the child label is always a stable identity
-// across namespace renames.
-func backupIdentityLabel(in Inputs) string {
+// commonAnnotations are stamped onto both RS and RD. Annotation values
+// have no character-set restrictions (unlike label values), so the
+// compound `<namespace>/<pvc>` backup identity lives here. Discovery
+// and ownership classification do not depend on annotations — they
+// match on labels — so this is purely human-readable metadata.
+func commonAnnotations(in Inputs) map[string]string {
+	return map[string]string{
+		labels.AnnotationBackupIdentity: backupIdentityValue(in),
+	}
+}
+
+// backupIdentityValue returns the value used for the
+// pvc-plumber.io/backup-identity annotation on RS/RD children. If the
+// PVC declared an override via annotation, that wins verbatim;
+// otherwise the default <namespace>/<pvc> form. Mirrors
+// naming.IdentityFor's override behavior so the child annotation is
+// always a stable identity across namespace renames.
+func backupIdentityValue(in Inputs) string {
 	if in.Spec.BackupIdentity != "" {
 		return in.Spec.BackupIdentity
 	}

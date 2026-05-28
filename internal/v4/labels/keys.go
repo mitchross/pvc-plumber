@@ -66,9 +66,23 @@ const (
 	AnnotationGID     = "pvc-plumber.io/gid"
 	AnnotationFSGroup = "pvc-plumber.io/fsGroup"
 
-	// AnnotationBackupIdentity overrides the default <namespace>/<pvc>
-	// identity. Use this when a PVC needs to retain a stable kopia identity
-	// across namespace renames or app migrations.
+	// AnnotationBackupIdentity is used in two places:
+	//
+	//   (1) On the source PVC: overrides the default <namespace>/<pvc>
+	//       identity. Use this when a PVC needs to retain a stable kopia
+	//       identity across namespace renames or app migrations.
+	//   (2) On operator-generated RS/RD children: the builder stamps the
+	//       resolved backup identity here for human/audit consumption.
+	//       Stored as an annotation rather than a label because the
+	//       default value `<namespace>/<pvc>` contains '/', which is
+	//       invalid in K8s label values (regex
+	//       `(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?`).
+	//       See the 2026-05-28 nginx-example/storage canary incident
+	//       in the talos-argocd-proxmox repo at
+	//       docs/pvc-plumber-v4-nginx-canary-incident.md.
+	//
+	// Discovery and ownership classification do NOT match on this annotation.
+	// They use LabelManagedByKey / LabelSourceNamespace / LabelSourcePVC.
 	AnnotationBackupIdentity = "pvc-plumber.io/backup-identity"
 
 	// AnnotationSkipRestore="true" opts this PVC out of restore-on-recreate
@@ -127,9 +141,17 @@ const (
 
 	// Source PVC pointer labels on generated children, used by the reconciler
 	// to find resources for a given PVC.
+	//
+	// NOTE: there is intentionally NO `LabelBackupIdentity` constant. The
+	// compound backup identity `<namespace>/<pvc>` contains '/', which is
+	// invalid in K8s label values. The builder stamps this identity as
+	// AnnotationBackupIdentity on RS/RD children instead. Discovery and
+	// ownership matching use the per-component labels below, which are
+	// always individually valid. See the 2026-05-28 nginx-example/storage
+	// canary incident (talos-argocd-proxmox
+	// docs/pvc-plumber-v4-nginx-canary-incident.md).
 	LabelSourceNamespace = "pvc-plumber.io/source-namespace"
 	LabelSourcePVC       = "pvc-plumber.io/source-pvc"
-	LabelBackupIdentity  = "pvc-plumber.io/backup-identity"
 	LabelTierOnChild     = "pvc-plumber.io/tier"
 )
 

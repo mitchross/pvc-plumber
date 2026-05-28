@@ -1,9 +1,11 @@
 package builder
 
 import (
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/mitchross/pvc-plumber/internal/v4/labels"
 	"github.com/mitchross/pvc-plumber/internal/v4/naming"
@@ -11,13 +13,15 @@ import (
 
 // Test-scope canonical values matching the live talos repo conventions.
 const (
-	tnsOpenWebUI  = "open-webui"
-	tpvcStorage   = "storage"
-	tcap10Gi      = "10Gi"
-	tscLonghorn   = "longhorn"
-	tsnapLonghorn = "longhorn-snapclass"
-	tcache2Gi     = "2Gi"
-	tshareRepo    = "volsync-kopia-repository"
+	tnsOpenWebUI            = "open-webui"
+	tnsNginxExample         = "nginx-example" // 2026-05-28 incident regression case
+	tpvcStorage             = "storage"
+	tcap10Gi                = "10Gi"
+	tscLonghorn             = "longhorn"
+	tsnapLonghorn           = "longhorn-snapclass"
+	tcache2Gi               = "2Gi"
+	tshareRepo              = "volsync-kopia-repository"
+	tBackupIdentityOverride = "immich-library"
 )
 
 func baseInputs() Inputs {
@@ -95,18 +99,143 @@ func TestBuildRS_SourcePointerLabels(t *testing.T) {
 	if lbls[labels.LabelTierOnChild] != labels.TierDaily.String() {
 		t.Errorf("tier-on-child label: got %q, want %q", lbls[labels.LabelTierOnChild], labels.TierDaily.String())
 	}
-	if lbls[labels.LabelBackupIdentity] != tnsOpenWebUI+"/"+tpvcStorage {
-		t.Errorf("backup-identity label: got %q, want %q",
-			lbls[labels.LabelBackupIdentity], tnsOpenWebUI+"/"+tpvcStorage)
+}
+
+// TestBuildRS_BackupIdentityAnnotation asserts the default
+// <namespace>/<pvc> backup identity is stamped onto the generated RS as
+// an annotation, NOT a label. Label values cannot contain '/' — see the
+// 2026-05-28 nginx-example/storage canary incident.
+func TestBuildRS_BackupIdentityAnnotation(t *testing.T) {
+	rs := BuildRS(baseInputs())
+	got := rs.GetAnnotations()[labels.AnnotationBackupIdentity]
+	want := tnsOpenWebUI + "/" + tpvcStorage
+	if got != want {
+		t.Errorf("RS backup-identity annotation: got %q, want %q", got, want)
+	}
+	// Defensive: must not also leak into labels under any key.
+	for k, v := range rs.GetLabels() {
+		if strings.Contains(v, "/") {
+			t.Errorf("RS label %q value %q contains '/' — must be annotation, not label", k, v)
+		}
+	}
+}
+
+// TestBuildRD_BackupIdentityAnnotation mirrors the RS check on the RD.
+func TestBuildRD_BackupIdentityAnnotation(t *testing.T) {
+	rd := BuildRD(baseInputs())
+	got := rd.GetAnnotations()[labels.AnnotationBackupIdentity]
+	want := tnsOpenWebUI + "/" + tpvcStorage
+	if got != want {
+		t.Errorf("RD backup-identity annotation: got %q, want %q", got, want)
+	}
+	for k, v := range rd.GetLabels() {
+		if strings.Contains(v, "/") {
+			t.Errorf("RD label %q value %q contains '/' — must be annotation, not label", k, v)
+		}
 	}
 }
 
 func TestBuildRS_BackupIdentityOverride(t *testing.T) {
 	in := baseInputs()
-	in.Spec.BackupIdentity = "immich-library"
+	in.Spec.BackupIdentity = tBackupIdentityOverride
 	rs := BuildRS(in)
-	if got := rs.GetLabels()[labels.LabelBackupIdentity]; got != "immich-library" {
-		t.Errorf("override identity: got %q, want %q", got, "immich-library")
+	if got := rs.GetAnnotations()[labels.AnnotationBackupIdentity]; got != tBackupIdentityOverride {
+		t.Errorf("override identity annotation: got %q, want %q", got, tBackupIdentityOverride)
+	}
+}
+
+func TestBuildRD_BackupIdentityOverride(t *testing.T) {
+	in := baseInputs()
+	in.Spec.BackupIdentity = tBackupIdentityOverride
+	rd := BuildRD(in)
+	if got := rd.GetAnnotations()[labels.AnnotationBackupIdentity]; got != tBackupIdentityOverride {
+		t.Errorf("override identity annotation: got %q, want %q", got, tBackupIdentityOverride)
+	}
+}
+
+// TestBuildRS_AllLabelValuesPassK8sValidation is the regression gate
+// for the 2026-05-28 nginx-example/storage canary incident: the builder
+// emitted "nginx-example/storage" as a label value and the API server
+// rejected the Create with `metadata.labels: Invalid value`. Every
+// label value the builder emits — on any input — must individually
+// pass K8s label-value validation.
+func TestBuildRS_AllLabelValuesPassK8sValidation(t *testing.T) {
+	rs := BuildRS(baseInputs())
+	for k, v := range rs.GetLabels() {
+		if errs := kvalidation.IsValidLabelValue(v); len(errs) > 0 {
+			t.Errorf("RS label %q value %q failed K8s validation: %v", k, v, errs)
+		}
+	}
+}
+
+// TestBuildRD_AllLabelValuesPassK8sValidation mirrors the RS check.
+func TestBuildRD_AllLabelValuesPassK8sValidation(t *testing.T) {
+	rd := BuildRD(baseInputs())
+	for k, v := range rd.GetLabels() {
+		if errs := kvalidation.IsValidLabelValue(v); len(errs) > 0 {
+			t.Errorf("RD label %q value %q failed K8s validation: %v", k, v, errs)
+		}
+	}
+}
+
+// TestBuildRS_NginxExampleStorageRegression is the literal regression
+// case for the 2026-05-28 incident: namespace=nginx-example,
+// pvc=storage, default identity, daily tier. Before the fix this
+// case emitted `pvc-plumber.io/backup-identity=nginx-example/storage`
+// as a LABEL and the K8s API server returned a 400.
+func TestBuildRS_NginxExampleStorageRegression(t *testing.T) {
+	in := baseInputs()
+	in.Namespace = tnsNginxExample
+	in.PVCName = tpvcStorage
+	rs := BuildRS(in)
+	wantIdentity := tnsNginxExample + "/" + tpvcStorage
+
+	for k, v := range rs.GetLabels() {
+		if errs := kvalidation.IsValidLabelValue(v); len(errs) > 0 {
+			t.Errorf("RS label %q value %q failed K8s validation: %v", k, v, errs)
+		}
+		if strings.Contains(v, "/") {
+			t.Errorf("RS label %q value %q contains '/' — must not be a label value", k, v)
+		}
+	}
+
+	if got := rs.GetAnnotations()[labels.AnnotationBackupIdentity]; got != wantIdentity {
+		t.Errorf("RS backup-identity annotation: got %q, want %q", got, wantIdentity)
+	}
+
+	// Sanity: the safe per-component labels remain individually valid.
+	lbls := rs.GetLabels()
+	if lbls[labels.LabelSourceNamespace] != tnsNginxExample {
+		t.Errorf("source-namespace label: got %q", lbls[labels.LabelSourceNamespace])
+	}
+	if lbls[labels.LabelSourcePVC] != tpvcStorage {
+		t.Errorf("source-pvc label: got %q", lbls[labels.LabelSourcePVC])
+	}
+}
+
+// TestBuildRD_NginxExampleStorageRegression mirrors the regression
+// case on the RD.
+func TestBuildRD_NginxExampleStorageRegression(t *testing.T) {
+	in := baseInputs()
+	in.Namespace = tnsNginxExample
+	in.PVCName = tpvcStorage
+	rd := BuildRD(in)
+	wantIdentity := tnsNginxExample + "/" + tpvcStorage
+
+	for k, v := range rd.GetLabels() {
+		if errs := kvalidation.IsValidLabelValue(v); len(errs) > 0 {
+			t.Errorf("RD label %q value %q failed K8s validation: %v", k, v, errs)
+		}
+		if strings.Contains(v, "/") {
+			t.Errorf("RD label %q value %q contains '/' — must not be a label value", k, v)
+		}
+	}
+
+	if got := rd.GetAnnotations()[labels.AnnotationBackupIdentity]; got != wantIdentity {
+		t.Errorf("RD backup-identity annotation: got %q, want %q", got, wantIdentity)
+	}
+	if rd.GetName() != tpvcStorage+"-dst" {
+		t.Errorf("RD name: got %q, want %q", rd.GetName(), tpvcStorage+"-dst")
 	}
 }
 
