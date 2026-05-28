@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -11,8 +12,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/mitchross/pvc-plumber/internal/v4/executor"
 	"github.com/mitchross/pvc-plumber/internal/v4/labels"
@@ -20,6 +26,13 @@ import (
 	"github.com/mitchross/pvc-plumber/internal/v4/naming"
 	"github.com/mitchross/pvc-plumber/internal/v4/planner"
 )
+
+// volsyncBackupPVCLabel is the convention label the talos inline RS/RD
+// pattern (and the builder) stamps with the source PVC name. Used as a
+// fallback in the child→PVC reverse map when the operator's own
+// source-namespace/source-pvc labels are absent (e.g. Argo-owned inline
+// children).
+const volsyncBackupPVCLabel = "volsync.backup/pvc"
 
 // Phase 5 — Patch 3: V4AuditReconciler skeleton/orchestration.
 // Phase 6 — Patch 6.7: bounded executor wired into the same Reconcile path.
@@ -152,20 +165,186 @@ type V4AuditReconciler struct {
 
 	// Now is injected for deterministic tests. nil → time.Now.
 	Now func() time.Time
+
+	// ResyncInterval, when > 0, makes every reconcile of a write-eligible
+	// (enabled + manage-volsync) PVC requeue itself after the interval.
+	// This is the belt-and-suspenders backstop to the RS/RD watch: even
+	// if a child Delete event is ever missed (informer gap, leader-
+	// election handoff, watch restart), a write-eligible PVC re-evaluates
+	// within one interval and recreates any missing operator-owned child —
+	// so the cluster can never silently sit with a pruned backup chain for
+	// hours again (the 2026-05-28 nginx-example/storage incident). Zero
+	// disables periodic requeue (the test default; production sets a few
+	// minutes via cmd/operator/main.go).
+	ResyncInterval time.Duration
 }
 
 // SetupWithManager registers the reconciler with the controller-runtime
-// manager. The controller watches corev1.PersistentVolumeClaim only;
-// RS / RD are read on demand in Reconcile, not watched (the v4 audit
-// model doesn't need to react to RS/RD events — those would only
-// indicate cluster drift that gets picked up on the next PVC reconcile
-// anyway, and watching them would multiply the reconcile rate without
-// benefit in audit mode).
+// manager. The PVC remains the reconcile primary (For), but as of rc7 the
+// controller ALSO watches the VolSync ReplicationSource / Replication
+// Destination children and maps a child event back to its owning PVC.
+//
+// Why this matters (the 2026-05-28 nginx-example/storage incident): before
+// rc7 the controller watched PVCs only. When Argo pruned the inline child
+// RS/RD, the PVC object itself did not change, so no event fired, Reconcile
+// never re-ran, and the operator left the PVC with no backup chain for ~15h
+// while /audit served a stale "already-matches" snapshot. Watching the
+// children — especially their Delete events — closes that gap: a prune now
+// re-enqueues the owning PVC within seconds, the Store is refreshed (so
+// /audit stops lying), and a write-eligible PVC's missing children are
+// recreated.
+//
+// RS/RD are handled as unstructured (the operator has no go.mod dependency
+// on the VolSync types — see pvc_controller.go). Watching an unstructured
+// object requires only that its GVK be set; controller-runtime resolves the
+// informer via the RESTMapper, NOT the scheme (Scheme.ObjectKinds reads the
+// GVK straight off an unstructured object), which is why observeCurrent's
+// cached unstructured Get has always worked without registering the VolSync
+// types in the manager scheme. So no scheme change is needed here.
+//
+// We do NOT use Owns()/EnqueueRequestForOwner: pvc-plumber deliberately sets
+// no ownerReference from a child back to its PVC (children must outlive
+// transient PVC churn), and Argo-owned inline children carry no pvc-plumber
+// ownerRef at all. Watches + a label/spec/name reverse-map (mapChildToPVC)
+// is the only mechanism that covers BOTH owner classes — and the Argo-owned
+// inline child is exactly the event class that caused the incident.
 func (r *V4AuditReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	rs := &unstructured.Unstructured{}
+	rs.SetGroupVersionKind(rsGVK)
+	rd := &unstructured.Unstructured{}
+	rd.SetGroupVersionKind(rdGVK)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.PersistentVolumeClaim{}).
+		Watches(rs, handler.EnqueueRequestsFromMapFunc(r.mapChildToPVC), builder.WithPredicates(childEventPredicate())).
+		Watches(rd, handler.EnqueueRequestsFromMapFunc(r.mapChildToPVC), builder.WithPredicates(childEventPredicate())).
 		Named("pvc-plumber-v4-audit").
 		Complete(r)
+}
+
+// childEventPredicate filters the RS/RD watch event stream.
+//
+//   - Create / Delete: always pass. Delete is THE fix — the incident was a
+//     prune (a Delete) that produced no reconcile. Create covers a child
+//     reappearing with the wrong shape.
+//   - Update: pass only when .metadata.generation changed. VolSync writes
+//     RS/RD .status (lastSyncTime, latestMoverStatus) on every backup tick,
+//     bumping resourceVersion but NOT generation; the reconciler reads only
+//     spec/metadata, so status-only updates carry no parity value and would
+//     otherwise amplify the reconcile rate needlessly.
+//   - Generic: dropped.
+//
+// Unrelated-resource filtering is intentionally NOT done here (a label
+// predicate is lossy on delete tombstones). mapChildToPVC is the
+// authoritative filter: it only enqueues when it can resolve a source PVC
+// that actually exists, so unrelated VolSync churn resolves to nothing.
+func childEventPredicate() predicate.Predicate {
+	return predicate.Funcs{
+		CreateFunc:  func(event.CreateEvent) bool { return true },
+		DeleteFunc:  func(event.DeleteEvent) bool { return true },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if e.ObjectOld == nil || e.ObjectNew == nil {
+				return true
+			}
+			return e.ObjectOld.GetGeneration() != e.ObjectNew.GetGeneration()
+		},
+	}
+}
+
+// mapChildToPVC translates an RS/RD watch event into a reconcile request
+// for the owning PVC. Returns nil (enqueue nothing) whenever the owning PVC
+// cannot be resolved or does not exist — it never guesses.
+//
+// The existence check (a cache-backed Get; the manager already runs a PVC
+// informer for For(&PVC{})) is what keeps unrelated cluster-wide VolSync
+// churn from amplifying the reconcile rate: a child whose source PVC we
+// can't find in the cluster is not ours to react to. It still fires for
+// every real child-delete of a live PVC — the incident case.
+func (r *V4AuditReconciler) mapChildToPVC(ctx context.Context, obj client.Object) []reconcile.Request {
+	if obj == nil {
+		return nil
+	}
+	// Mirror Reconcile's system-namespace short-circuit.
+	if _, isSystem := r.SystemNamespaces[obj.GetNamespace()]; isSystem {
+		return nil
+	}
+	ns, name := resolveSourcePVC(obj)
+	if ns == "" || name == "" {
+		return nil
+	}
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, pvc); err != nil {
+		// NotFound (PVC gone or unrelated child) or any read error: do not
+		// enqueue. A genuinely-deleted PVC is cleaned from the Store by its
+		// own PVC Delete event, not here.
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}}
+}
+
+// resolveSourcePVC derives the owning PVC's (namespace, name) from an RS/RD
+// object, in priority order. Pure (no client). Returns ("","") when no
+// signal yields a PVC name — the caller must then enqueue nothing.
+//
+// Priority:
+//  1. operator source labels pvc-plumber.io/source-namespace +
+//     /source-pvc — the canonical pair the builder stamps on every
+//     pvc-plumber-created child.
+//  2. spec-derived — RS.spec.sourcePVC, RD.spec.kopia.sourceIdentity.
+//     sourcePVCName. Covers Argo-owned inline children that lack the
+//     operator source labels (the nginx-example canary case). The child
+//     is always co-located with its PVC, so its own namespace is used.
+//  3. the volsync.backup/pvc convention label (name only).
+//  4. name-derivation via the bare-dst naming strategy (RS name == <pvc>;
+//     RD name == <pvc>-dst). Last resort for delete tombstones carrying
+//     neither labels nor spec.
+func resolveSourcePVC(obj client.Object) (namespace, name string) {
+	lbls := obj.GetLabels()
+	childNS := obj.GetNamespace()
+
+	// Priority 1: operator-stamped source labels.
+	if ns := lbls[labels.LabelSourceNamespace]; ns != "" {
+		if pvc := lbls[labels.LabelSourcePVC]; pvc != "" {
+			return ns, pvc
+		}
+	}
+
+	kind := obj.GetObjectKind().GroupVersionKind().Kind
+
+	// Priority 2: spec-derived (handles label-less Argo inline children).
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		switch kind {
+		case rsGVK.Kind:
+			if pvc, _, _ := unstructured.NestedString(u.Object, "spec", "sourcePVC"); pvc != "" {
+				return childNS, pvc
+			}
+		case rdGVK.Kind:
+			if pvc, _, _ := unstructured.NestedString(u.Object, "spec", "kopia", "sourceIdentity", "sourcePVCName"); pvc != "" {
+				return childNS, pvc
+			}
+		}
+	}
+
+	// Priority 3: volsync.backup/pvc convention label.
+	if pvc := lbls[volsyncBackupPVCLabel]; pvc != "" {
+		return childNS, pvc
+	}
+
+	// Priority 4: name-derivation (bare-dst).
+	objName := obj.GetName()
+	if objName == "" || childNS == "" {
+		return "", ""
+	}
+	switch kind {
+	case rsGVK.Kind:
+		return childNS, objName
+	case rdGVK.Kind:
+		if strings.HasSuffix(objName, "-dst") {
+			return childNS, strings.TrimSuffix(objName, "-dst")
+		}
+	}
+	return "", ""
 }
 
 // Reconcile is the entrypoint controller-runtime calls for each PVC event.
@@ -337,7 +516,18 @@ func (r *V4AuditReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		"exec_failed", execResult.Counts.Failed,
 	)
 
-	return ctrl.Result{}, nil
+	return r.resultFor(spec), nil
+}
+
+// resultFor returns the reconcile Result. Write-eligible PVCs are requeued
+// after ResyncInterval (when set) so a missed RS/RD watch event self-heals
+// within a bounded window; everything else returns the zero Result (event-
+// driven only). See the ResyncInterval field doc.
+func (r *V4AuditReconciler) resultFor(spec labels.Spec) ctrl.Result {
+	if r.ResyncInterval > 0 && spec.Enabled && spec.ManageVolSync {
+		return ctrl.Result{RequeueAfter: r.ResyncInterval}
+	}
+	return ctrl.Result{}
 }
 
 // toExecutionResultSummary translates the executor's Result into the

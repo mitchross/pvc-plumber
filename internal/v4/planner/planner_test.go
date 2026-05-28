@@ -340,6 +340,49 @@ func TestPlanFor_EnabledManage_InlineArgoDrifts_InlineArgoObserved(t *testing.T)
 	}
 }
 
+// rc7 confirmed policy: a mixed/partial state where one inline-argo child
+// is missing while its sibling survives must NOT create the missing
+// operator-equivalent child (that would fight Argo over a single name).
+// Verdict is needs-human-review with a loud blocker, zero ops.
+func TestPlanFor_EnabledManage_PartialInlineArgo_RDMissing_NeedsHumanReview(t *testing.T) {
+	in := withEnabledManage()
+	in.Owner = OwnerInlineArgo
+	in.Current = matchingCurrent(in, "argocd")
+	in.Current.RDPresent = false // Argo pruned the RD; inline RS survives.
+	in.Current.RDName = ""
+	in.Current.RDRepository = ""
+	got := PlanFor(in)
+	if got.Action != ActionNeedsHumanReview {
+		t.Errorf("Action: got %q, want %q", got.Action, ActionNeedsHumanReview)
+	}
+	if len(got.Ops) != 0 {
+		t.Fatalf("Ops: got %d, want 0 (must NOT create a child conflicting with the surviving inline-argo sibling)", len(got.Ops))
+	}
+	if len(got.Blockers) == 0 {
+		t.Error("expected a loud blocker explaining the partial inline-argo state")
+	}
+}
+
+func TestPlanFor_EnabledManage_PartialInlineArgo_RSMissing_NeedsHumanReview(t *testing.T) {
+	in := withEnabledManage()
+	in.Owner = OwnerInlineArgo
+	in.Current = matchingCurrent(in, "argocd")
+	in.Current.RSPresent = false // Argo pruned the RS; inline RD survives.
+	in.Current.RSName = ""
+	in.Current.RSRepository = ""
+	in.Current.RSSourcePVC = ""
+	got := PlanFor(in)
+	if got.Action != ActionNeedsHumanReview {
+		t.Errorf("Action: got %q, want %q", got.Action, ActionNeedsHumanReview)
+	}
+	if len(got.Ops) != 0 {
+		t.Fatalf("Ops: got %d, want 0", len(got.Ops))
+	}
+	if len(got.Blockers) == 0 {
+		t.Error("expected a loud blocker explaining the partial inline-argo state")
+	}
+}
+
 func TestPlanFor_EnabledManage_UnmanagedMatches_AlreadyMatches(t *testing.T) {
 	in := withEnabledManage()
 	in.Owner = OwnerUnmanagedOrGitopsObserved

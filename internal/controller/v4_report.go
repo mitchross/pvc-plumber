@@ -323,6 +323,19 @@ type ParityEntry struct {
 	ExecutionResult *ExecutionResultSummary `json:"execution_result,omitempty"`
 	ReasonCode      string                  `json:"reason_code,omitempty"`
 	EvaluatedAt     time.Time               `json:"evaluated_at"`
+
+	// AgeSeconds and Stale are NOT stored — they are computed by
+	// Snapshot() at read time as (GeneratedAt - EvaluatedAt). They make
+	// the freshness of each row explicit so /audit can never silently
+	// look fresh while the underlying verdict is hours old (the
+	// 2026-05-28 nginx-example/storage incident: /audit kept reporting
+	// "inline-argo / already-matches" for ~15h after the RS/RD were
+	// pruned, because GeneratedAt was stamped now() on every request
+	// while the entry itself was never re-evaluated). AgeSeconds is
+	// always populated; Stale is true only when the Store has a non-zero
+	// MaxAge and the entry's age exceeds it.
+	AgeSeconds int64 `json:"age_seconds"`
+	Stale      bool  `json:"stale"`
 }
 
 // Key returns the stable map key used by the Store and by the /audit
@@ -351,6 +364,14 @@ type ReportSummary struct {
 	ByAction  map[ActionKind]int          `json:"by_action"`
 	ByOwner   map[OwnerClassification]int `json:"by_owner_classification"`
 	BySource  map[LabelSource]int         `json:"by_label_source"`
+
+	// EntriesStale counts entries whose age exceeds the Store's MaxAge
+	// (0 when MaxAge is unset). OldestEvaluatedAt is the earliest
+	// EvaluatedAt across all entries (zero when there are no entries) —
+	// an at-a-glance "is any verdict going stale?" signal for operators
+	// and monitoring. Both added in rc7 after the nginx-example incident.
+	EntriesStale      int       `json:"entries_stale"`
+	OldestEvaluatedAt time.Time `json:"oldest_evaluated_at,omitzero"`
 }
 
 // Store is the in-memory parity registry. Written to by the
@@ -372,8 +393,23 @@ type Store struct {
 	namingStrategy    string
 	defaultRepoSecret string
 
+	// maxAge, when > 0, is the threshold beyond which a Snapshot() marks
+	// an entry Stale (age = GeneratedAt - EvaluatedAt). Zero disables the
+	// stale flag (AgeSeconds is still computed). Set via SetMaxAge; the
+	// operator binary configures it from runtime config.
+	maxAge time.Duration
+
 	// now is injected for deterministic tests. Defaults to time.Now.
 	now func() time.Time
+}
+
+// SetMaxAge sets the staleness threshold used by Snapshot(). Safe to call
+// once at startup before the reconciler begins writing. A non-positive
+// value disables the Stale flag (per-entry AgeSeconds is still reported).
+func (s *Store) SetMaxAge(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxAge = d
 }
 
 // NewStore constructs an empty Store. The three metadata strings appear
@@ -436,6 +472,8 @@ func (s *Store) Snapshot() ParityReport {
 	for _, e := range s.entries {
 		entries = append(entries, e)
 	}
+	maxAge := s.maxAge
+	generatedAt := s.now()
 	s.mu.RUnlock()
 
 	sort.Slice(entries, func(i, j int) bool {
@@ -451,14 +489,35 @@ func (s *Store) Snapshot() ParityReport {
 		ByOwner:   zeroOwnerMap(),
 		BySource:  zeroSourceMap(),
 	}
-	for _, e := range entries {
+	for i := range entries {
+		e := &entries[i]
 		summary.ByAction[e.Action]++
 		summary.ByOwner[e.Owner]++
 		summary.BySource[e.LabelSource]++
+
+		// Compute per-entry freshness against the same generatedAt the
+		// report header carries, so age is self-consistent. EvaluatedAt
+		// is always set by Store.Set, so it is never zero here in
+		// practice; guard anyway so a hand-built entry can't report a
+		// nonsense negative/huge age.
+		if !e.EvaluatedAt.IsZero() {
+			age := generatedAt.Sub(e.EvaluatedAt)
+			if age < 0 {
+				age = 0
+			}
+			e.AgeSeconds = int64(age.Seconds())
+			if maxAge > 0 && age > maxAge {
+				e.Stale = true
+				summary.EntriesStale++
+			}
+			if summary.OldestEvaluatedAt.IsZero() || e.EvaluatedAt.Before(summary.OldestEvaluatedAt) {
+				summary.OldestEvaluatedAt = e.EvaluatedAt
+			}
+		}
 	}
 
 	return ParityReport{
-		GeneratedAt:       s.now(),
+		GeneratedAt:       generatedAt,
 		OperatorMode:      s.operatorMode,
 		NamingStrategy:    s.namingStrategy,
 		DefaultRepoSecret: s.defaultRepoSecret,

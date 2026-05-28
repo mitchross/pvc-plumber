@@ -328,8 +328,37 @@ func planWriteEligible(in Inputs) Plan {
 		return Plan{Action: ActionAlreadyMatches}
 
 	case OwnerInlineArgo:
-		// Argo / GitOps owns these. NEVER patch or delete. Verdict
-		// is matches-or-observed.
+		// Argo / GitOps owns these. NEVER patch or delete.
+		//
+		// rc7 partial-state guard (confirmed policy): if exactly one child
+		// is present and it is inline-argo-owned while its sibling is
+		// missing, this is an anomalous half-state — e.g. an Argo prune
+		// removed one inline child but not the other, or a hand-edit. The
+		// operator MUST NOT create the missing operator-equivalent sibling:
+		// that would put two owners on a single name (pvc-plumber vs argocd)
+		// and start a sync tug-of-war. There is exactly one valid name per
+		// child, so the two owners cannot coexist. Surface it loudly as
+		// needs-human-review with a distinct blocker so it is not silently
+		// conflated with steady-state inline-argo drift. Zero ops. The
+		// resolution is a human decision: either restore the missing inline
+		// child via Git/Argo, or finish the handoff by removing the
+		// surviving inline child from Git (which lands OwnerNone → create).
+		if !in.Current.RSPresent || !in.Current.RDPresent {
+			missing, surviving := kindRS, kindRD
+			if in.Current.RSPresent {
+				missing, surviving = kindRD, kindRS
+			}
+			return Plan{
+				Action: ActionNeedsHumanReview,
+				Blockers: []string{fmt.Sprintf(
+					"partial inline-argo state: %s is missing while inline-argo-owned %s is still present; "+
+						"pvc-plumber will not create a conflicting child — restore the missing resource via Git/Argo, "+
+						"or complete the handoff by removing the surviving inline %s so the operator can take full ownership",
+					missing, surviving, surviving)},
+			}
+		}
+		// Both children present and inline-argo-owned. Verdict is
+		// matches-or-observed; never a write.
 		if shapeMatches(in) {
 			return Plan{
 				Action: ActionAlreadyMatches,

@@ -63,6 +63,20 @@ const (
 	reconcilerKindV4 = "v4"
 )
 
+// rc7 backstops against the 2026-05-28 nginx-example/storage backup gap.
+//
+//   - v4ResyncInterval: write-eligible PVCs requeue on this cadence so a
+//     missed RS/RD watch event self-heals within the window instead of
+//     persisting until the next PVC change. The RS/RD watch is the primary
+//     trigger; this is belt-and-suspenders.
+//   - auditStaleMaxAge: /audit marks an entry Stale once its verdict is
+//     older than this, so a stalled reconciler can never make /audit look
+//     fresh while the underlying state has drifted.
+const (
+	v4ResyncInterval = 10 * time.Minute
+	auditStaleMaxAge = 15 * time.Minute
+)
+
 // reconcilerKindFor is the single source of truth for "which reconciler
 // runs in this mode." Audit AND permissive route to the v4 reconciler
 // + executor pair (the executor's Mode-gated short-circuit keeps audit
@@ -331,6 +345,9 @@ func main() {
 			naming.StrategyBareDst.String(),
 			naming.DefaultRepoSecretName,
 		)
+		// rc7: surface per-entry staleness in /audit so a stalled
+		// reconciler can never report fresh-looking but stale verdicts.
+		auditStore.SetMaxAge(auditStaleMaxAge)
 	}
 
 	// errgroup collects errors from any subsystem. ctx derives from
@@ -702,6 +719,9 @@ func newV4Reconciler(
 		DefaultUID:           int64OrZero(runtimeCfg.DefaultUID),
 		DefaultGID:           int64OrZero(runtimeCfg.DefaultGID),
 		DefaultFSGroup:       int64OrZero(runtimeCfg.DefaultFSGroup),
+		// rc7: periodic self-heal backstop for write-eligible PVCs (the
+		// RS/RD watch is the primary trigger; this covers missed events).
+		ResyncInterval: v4ResyncInterval,
 	}
 }
 
