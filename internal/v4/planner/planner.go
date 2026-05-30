@@ -26,7 +26,9 @@
 //  3. Spec.Errors non-empty                        → NeedsHumanReview
 //  4. no opt-in (no enabled, no manage, no legacy) → SkippedNotOptedIn
 //  5. manage-volsync=true but enabled=false        → SkippedNotOptedIn + blocker
-//  6. write-eligible (Enabled + ManageVolSync):
+//     5b. write-eligible BUT namespace not managed     → SkippedNamespaceNotManaged
+//     (NamespaceManaged=false; suppresses ALL writes incl. tier=disabled)
+//  6. write-eligible (Enabled + ManageVolSync) AND namespace managed:
 //     a. tier=disabled + operator-owned current   → WouldDelete + delete ops
 //     b. tier=disabled + non-operator current     → AlreadyMatches + note
 //     c. tier!=disabled + no current              → WouldCreate + create ops
@@ -79,6 +81,13 @@ const (
 	ActionSkippedExempt      ActionKind = "skipped-exempt"
 	ActionSkippedNotOptedIn  ActionKind = "skipped-not-opted-in"
 	ActionNeedsHumanReview   ActionKind = "needs-human-review"
+	// ActionSkippedNamespaceNotManaged: the PVC is fully write-eligible
+	// (both fuse labels + valid tier) but its namespace is NOT opted in
+	// to operator management (lacks pvc-plumber.io/managed-namespace=true).
+	// The operator suppresses ALL writes (create/update/delete) — zero
+	// ops. This is the namespace write gate (v4.0.1) that makes a DRY
+	// cluster-wide RS/RD write ClusterRoleBinding safe.
+	ActionSkippedNamespaceNotManaged ActionKind = "skipped-namespace-not-managed"
 )
 
 // OwnerClassification mirrors controller.OwnerClassification.
@@ -181,6 +190,14 @@ type Inputs struct {
 	Current     CurrentState
 	Owner       OwnerClassification
 
+	// NamespaceManaged is true when the PVC's namespace carries
+	// pvc-plumber.io/managed-namespace=true. The reconciler sets it from
+	// the live Namespace object. When false, a write-eligible PVC is
+	// gated to ActionSkippedNamespaceNotManaged (zero ops) — the
+	// namespace write gate (v4.0.1). Reporting-only verdicts are
+	// unaffected (they never write regardless of this flag).
+	NamespaceManaged bool
+
 	// Naming + shared-resource references.
 	NamingStrategy    naming.Strategy
 	DefaultRepoSecret string
@@ -260,6 +277,26 @@ func PlanFor(in Inputs) Plan {
 	// surface (legacy backup label OR enabled=true). Build the
 	// expected state and branch on write eligibility.
 	writeEligible := in.Spec.Enabled && in.Spec.ManageVolSync
+
+	// Namespace write gate (v4.0.1). A PVC may be fully opted in (both
+	// fuse labels + valid tier) yet live in a namespace that has NOT been
+	// opted in to operator management. In that case the operator must NOT
+	// write — this is the software gate that lets the cluster move to a
+	// single DRY cluster-wide RS/RD write ClusterRoleBinding without
+	// per-namespace RoleBindings being the only boundary. It suppresses
+	// ALL writes for this PVC (create/update/delete, INCLUDING the
+	// tier=disabled delete path) by short-circuiting before any
+	// write-eligible branch. Reporting-only verdicts (not write-eligible)
+	// are unaffected — they never write regardless, and we let them fall
+	// through to planNotWriteEligible so /audit still reports their state.
+	if writeEligible && !in.NamespaceManaged {
+		return Plan{
+			Action: ActionSkippedNamespaceNotManaged,
+			Blockers: []string{
+				"namespace lacks pvc-plumber.io/managed-namespace=true; operator will not write RS/RD here (PVC is opted in, but the namespace is not operator-managed)",
+			},
+		}
+	}
 
 	if writeEligible {
 		return planWriteEligible(in)

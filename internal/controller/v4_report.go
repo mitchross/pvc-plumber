@@ -117,6 +117,14 @@ const (
 	// reconciler reports the blockers and refuses to compute a clean
 	// expected/current diff until they're resolved.
 	ActionNeedsHumanReview ActionKind = "needs-human-review"
+
+	// ActionSkippedNamespaceNotManaged: the PVC is fully write-eligible
+	// (both fuse labels + valid tier) but its namespace lacks
+	// pvc-plumber.io/managed-namespace=true. The operator suppresses all
+	// writes (zero planned_ops). This is the namespace write gate (v4.0.1)
+	// that makes a DRY cluster-wide RS/RD write ClusterRoleBinding safe.
+	// Mirrors planner.ActionSkippedNamespaceNotManaged (same wire string).
+	ActionSkippedNamespaceNotManaged ActionKind = "skipped-namespace-not-managed"
 )
 
 // AllActionKinds returns every defined ActionKind, sorted for deterministic
@@ -127,6 +135,7 @@ func AllActionKinds() []ActionKind {
 		ActionInlineArgoObserved,
 		ActionNeedsHumanReview,
 		ActionSkippedExempt,
+		ActionSkippedNamespaceNotManaged,
 		ActionSkippedNotOptedIn,
 		ActionWouldAdopt,
 		ActionWouldCreate,

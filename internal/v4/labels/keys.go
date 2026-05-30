@@ -160,3 +160,24 @@ const (
 // fan out the shared kopia repo Secret to a namespace. The operator does
 // NOT manage this label; it reads it.
 const NamespacePrivilegedMoversLabel = "volsync.backube/privileged-movers"
+
+// NamespaceManagedLabel opts a namespace in to pvc-plumber operator
+// management. It is the namespace-level WRITE GATE (v4.0.1): even when a
+// PVC carries BOTH fuse labels (LabelEnabled + LabelManageVolSync), the
+// operator will NOT create/update/delete VolSync RS/RD in a namespace that
+// lacks this label set to exactly "true".
+//
+// This is the software replacement for relying on per-namespace
+// volsync-writer RoleBindings as the only namespace boundary. With this
+// gate enforced in the planner, a single DRY cluster-wide RS/RD write
+// ClusterRoleBinding becomes safe: RBAC is the mechanism, this label is
+// the boundary. The operator never sets this label; it reads it.
+const NamespaceManagedLabel = "pvc-plumber.io/managed-namespace"
+
+// NamespaceManaged reports whether the namespace is opted in to pvc-plumber
+// operator management. Strict and FAIL-CLOSED: returns true only for the
+// exact value "true" (a typo'd, empty, or mixed-case value fails closed →
+// the operator will not write). Pure; nil-safe (a nil map yields false).
+func NamespaceManaged(nsLabels map[string]string) bool {
+	return nsLabels[NamespaceManagedLabel] == "true"
+}

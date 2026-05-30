@@ -407,6 +407,32 @@ func (r *V4AuditReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// classification logic.)
 	owner := ClassifyOwner(current, expected)
 
+	// Step 8.5 (v4.0.1): namespace write gate. Read the PVC's Namespace
+	// and check the pvc-plumber.io/managed-namespace opt-in label. This is
+	// the software boundary that lets the cluster use a single DRY
+	// cluster-wide RS/RD write ClusterRoleBinding instead of per-namespace
+	// RoleBindings: even with cluster-wide RBAC, the planner refuses to
+	// write in namespaces that are not opted in.
+	//
+	// Fail-closed error handling:
+	//   - NotFound  → unmanaged (nsManaged stays false). The planner
+	//     gates writes off; reporting still proceeds.
+	//   - any other error → return it so the reconcile RETRIES rather than
+	//     recording a possibly-wrong verdict (or, worse, treating a
+	//     transient apiserver blip on a managed namespace as a reason to
+	//     stop managing it). We have not executed anything yet, so a retry
+	//     is side-effect-free.
+	nsManaged := false
+	nsObj := &corev1.Namespace{}
+	if err := r.Get(ctx, types.NamespacedName{Name: req.Namespace}, nsObj); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("get namespace %s: %w", req.Namespace, err)
+		}
+		// NotFound: leave nsManaged=false (fail-closed) and continue.
+	} else {
+		nsManaged = labels.NamespaceManaged(nsObj.GetLabels())
+	}
+
 	// Step 9: build planner.Inputs and call PlanFor. The planner replaces
 	// the old DecideAction call site as of Patch 6.5; it implements the
 	// full v4 decision precedence (backup-exempt → parse errors → no
@@ -430,6 +456,7 @@ func (r *V4AuditReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		LabelSource:          planner.LabelSource(string(source)),
 		Current:              toPlannerCurrent(current),
 		Owner:                planner.OwnerClassification(string(owner)),
+		NamespaceManaged:     nsManaged,
 		NamingStrategy:       r.NamingStrategy,
 		DefaultRepoSecret:    r.DefaultRepoSecret,
 		DefaultSnapshotClass: r.DefaultSnapshotClass,

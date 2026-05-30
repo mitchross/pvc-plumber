@@ -49,7 +49,38 @@ func newV4Fixture(t *testing.T, seedObjs ...client.Object) *v4Fixture {
 func newV4ModeFixture(t *testing.T, m mode.Mode, seedObjs ...client.Object) *v4Fixture {
 	t.Helper()
 	scheme := newTestScheme(t)
-	fakeC := fake.NewClientBuilder().WithScheme(scheme).WithObjects(seedObjs...).Build()
+	// v4.0.1 namespace write gate: the reconciler now reads
+	// pvc-plumber.io/managed-namespace on the PVC's Namespace before
+	// allowing writes. Pre-v4.0.1 tests assume write-eligible PVCs reach
+	// the create/update/delete paths, which now requires a MANAGED
+	// Namespace to exist. Auto-seed a managed Namespace for every
+	// namespace referenced by the seed objects — UNLESS the test provided
+	// its own Namespace object for it (so a test can opt a namespace OUT
+	// of management by seeding an unlabeled Namespace, or omit one to
+	// exercise the NotFound→unmanaged path).
+	providedNS := map[string]bool{}
+	for _, o := range seedObjs {
+		if _, ok := o.(*corev1.Namespace); ok {
+			providedNS[o.GetName()] = true
+		}
+	}
+	seenNS := map[string]bool{}
+	var nsObjs []client.Object
+	for _, o := range seedObjs {
+		ns := o.GetNamespace()
+		if ns == "" || providedNS[ns] || seenNS[ns] {
+			continue
+		}
+		seenNS[ns] = true
+		nsObjs = append(nsObjs, &corev1.Namespace{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   ns,
+				Labels: map[string]string{v4labels.NamespaceManagedLabel: "true"},
+			},
+		})
+	}
+	allObjs := append(nsObjs, seedObjs...)
+	fakeC := fake.NewClientBuilder().WithScheme(scheme).WithObjects(allObjs...).Build()
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 	auditC := auditclient.New(fakeC, m, log)
@@ -1592,4 +1623,53 @@ func TestV4Reconcile_Patch67_PermissiveChartEraResourcesUntouched(t *testing.T) 
 	// Verb totals: 2 creates only (the chart-era resources are seed,
 	// not executor output).
 	f.assertDidWriteByVerb(t, 2, 0, 0)
+}
+
+// =============================================================================
+// v4.0.1: namespace write gate (reconciler integration)
+// =============================================================================
+
+// A write-eligible PVC whose namespace LACKS pvc-plumber.io/managed-namespace
+// is gated: action skipped-namespace-not-managed, no cluster writes (even in
+// permissive mode), blocker present. The test seeds its OWN unlabeled
+// Namespace so the fixture auto-seed (which would label it managed) is
+// skipped.
+func TestV4Reconcile_NamespaceNotManaged_GatesWrite(t *testing.T) {
+	unmanagedNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "ns-unmanaged"}}
+	pvc := makePVC("ns-unmanaged", "data", map[string]string{
+		v4labels.LabelEnabled:       labelTrue,
+		v4labels.LabelManageVolSync: labelTrue,
+		v4labels.LabelTier:          backupDaily,
+	}, nil)
+	f := newV4ModeFixture(t, mode.Permissive, unmanagedNS, pvc)
+	entry := f.reconcile("ns-unmanaged", "data")
+
+	if entry.Action != ActionSkippedNamespaceNotManaged {
+		t.Errorf("Action: got %q, want %q", entry.Action, ActionSkippedNamespaceNotManaged)
+	}
+	if len(entry.PlannedOps) != 0 {
+		t.Errorf("PlannedOps: got %d, want 0 (namespace gate)", len(entry.PlannedOps))
+	}
+	if len(entry.Blockers) == 0 {
+		t.Error("expected a namespace-gate blocker in the /audit entry")
+	}
+	f.assertNoWrites()
+}
+
+// A write-eligible PVC whose namespace IS labeled managed proceeds to
+// would-create. Uses the fixture auto-seed (managed) by not providing a
+// Namespace — proving the managed-namespace label flows through to the
+// planner and allows the write.
+func TestV4Reconcile_NamespaceManaged_AllowsWrite(t *testing.T) {
+	pvc := makePVC("ns-managed", "data", map[string]string{
+		v4labels.LabelEnabled:       labelTrue,
+		v4labels.LabelManageVolSync: labelTrue,
+		v4labels.LabelTier:          backupDaily,
+	}, nil)
+	f := newV4Fixture(t, pvc) // audit mode; auto-seeds a managed Namespace
+	entry := f.reconcile("ns-managed", "data")
+
+	if entry.Action != ActionWouldCreate {
+		t.Errorf("Action: got %q, want %q (managed namespace must allow the write path)", entry.Action, ActionWouldCreate)
+	}
 }

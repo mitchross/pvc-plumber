@@ -32,15 +32,19 @@ const (
 // no manage) so a test that forgets to set them gets a clear failure.
 func baseInputs() Inputs {
 	return Inputs{
-		Namespace:            tns,
-		PVCName:              tpvc,
-		PVCCapacity:          tcap,
-		PVCAccessModes:       []string{"ReadWriteOnce"},
-		PVCStorageClass:      tscClass,
-		Spec:                 labels.Spec{},
-		LabelSource:          LabelSourceNone,
-		Owner:                OwnerNone,
-		Current:              CurrentState{},
+		Namespace:       tns,
+		PVCName:         tpvc,
+		PVCCapacity:     tcap,
+		PVCAccessModes:  []string{"ReadWriteOnce"},
+		PVCStorageClass: tscClass,
+		Spec:            labels.Spec{},
+		LabelSource:     LabelSourceNone,
+		Owner:           OwnerNone,
+		Current:         CurrentState{},
+		// v4.0.1: default to a MANAGED namespace so existing write-eligible
+		// cases keep exercising the create/update/delete paths. Gate-off
+		// cases set NamespaceManaged:false explicitly.
+		NamespaceManaged:     true,
 		NamingStrategy:       naming.StrategyBareDst,
 		DefaultRepoSecret:    tshared,
 		DefaultSnapshotClass: tsnap,
@@ -752,4 +756,72 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// =============================================================================
+// v4.0.1: namespace write gate (rule 5b)
+// =============================================================================
+
+// A fully write-eligible PVC (both fuse labels, valid tier, no current)
+// in an UNMANAGED namespace must yield skipped-namespace-not-managed with
+// ZERO ops and a blocker — the gate suppresses the create.
+func TestPlanFor_WriteEligible_NamespaceNotManaged_SkippedNoOps(t *testing.T) {
+	in := withEnabledManage()
+	in.NamespaceManaged = false
+	got := PlanFor(in)
+	if got.Action != ActionSkippedNamespaceNotManaged {
+		t.Errorf("Action: got %q, want %q", got.Action, ActionSkippedNamespaceNotManaged)
+	}
+	if len(got.Ops) != 0 {
+		t.Errorf("Ops: got %d, want 0 (namespace gate must suppress all writes)", len(got.Ops))
+	}
+	if len(got.Blockers) == 0 {
+		t.Error("expected a blocker explaining the namespace gate")
+	}
+}
+
+// The same gated PVC in a MANAGED namespace creates normally — proving
+// the gate is the only thing standing between eligible and would-create.
+func TestPlanFor_WriteEligible_NamespaceManaged_WouldCreate(t *testing.T) {
+	in := withEnabledManage()
+	in.NamespaceManaged = true
+	got := PlanFor(in)
+	if got.Action != ActionWouldCreate {
+		t.Errorf("Action: got %q, want %q", got.Action, ActionWouldCreate)
+	}
+	if len(got.Ops) != 2 {
+		t.Errorf("Ops: got %d, want 2 (RS+RD create)", len(got.Ops))
+	}
+}
+
+// A NON-opted-in PVC (no fuse labels) in a managed namespace is
+// unaffected by the gate — it is skipped-not-opted-in. The gate only
+// fires for write-eligible PVCs.
+func TestPlanFor_NotOptedIn_NamespaceManaged_SkippedNotOptedIn(t *testing.T) {
+	in := baseInputs() // NamespaceManaged:true, no opt-in labels
+	got := PlanFor(in)
+	if got.Action != ActionSkippedNotOptedIn {
+		t.Errorf("Action: got %q, want %q", got.Action, ActionSkippedNotOptedIn)
+	}
+	if len(got.Ops) != 0 {
+		t.Errorf("Ops: got %d, want 0", len(got.Ops))
+	}
+}
+
+// tier=disabled + operator-owned current in an UNMANAGED namespace must
+// NOT emit delete ops — the namespace gate also suppresses the
+// tier=disabled teardown path (it short-circuits before rule 6a).
+func TestPlanFor_TierDisabled_NamespaceNotManaged_NoDeleteOps(t *testing.T) {
+	in := withEnabledManage()
+	in.Spec.Tier = labels.TierDisabled
+	in.NamespaceManaged = false
+	in.Owner = OwnerPVCPlumber
+	in.Current = matchingCurrent(in, "pvc-plumber")
+	got := PlanFor(in)
+	if got.Action != ActionSkippedNamespaceNotManaged {
+		t.Errorf("Action: got %q, want %q", got.Action, ActionSkippedNamespaceNotManaged)
+	}
+	if len(got.Ops) != 0 {
+		t.Errorf("Ops: got %d, want 0 (gate must block tier=disabled delete)", len(got.Ops))
+	}
 }

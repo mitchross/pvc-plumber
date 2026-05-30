@@ -39,6 +39,8 @@ func TestActionKindValues(t *testing.T) {
 		ActionSkippedNotOptedIn:  "skipped-not-opted-in",
 		ActionNeedsHumanReview:   "needs-human-review",
 		ActionWriteGateMissing:   actionWriteGateMissingStr,
+
+		ActionSkippedNamespaceNotManaged: "skipped-namespace-not-managed",
 	}
 	for k, s := range want {
 		if string(k) != s {
