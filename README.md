@@ -5,6 +5,14 @@
 
 **One label. Full backup lifecycle. Automatic restore on re-create.**
 
+> ⚠️ **Current shipped model is v4 — this intro describes the older v1/v2 design.** In **v4.0.1**
+> (what runs in production) you opt in with `pvc-plumber.io/enabled` + `pvc-plumber.io/tier` on the
+> PVC **and** `pvc-plumber.io/managed-namespace: "true"` on the namespace; the operator references a
+> **shared** repo Secret (`volsync-kopia-repository`) instead of generating a per-PVC `ExternalSecret`;
+> and the `dataSourceRef` lives in the **Git PVC manifest** (there is **no admission webhook** in v4).
+> See **[docs/v4-vs-v5.md](docs/v4-vs-v5.md)** (shipped vs design-only) and **[docs/audit-api.md](docs/audit-api.md)**.
+> The `backup: hourly` label below is the **dead legacy** label.
+
 pvc-plumber is a Kubernetes operator that takes care of the entire PVC backup story in a homelab cluster. You stick `backup: hourly` (or `daily`) on a PersistentVolumeClaim, and the operator does *everything else* — creates the per-PVC kopia password, schedules the backups, sets up the restore target, and (the killer feature) **if you delete and recreate that PVC later, the new one comes up populated from the last backup automatically.** No manual restore command. No copy-paste from a runbook.
 
 Two diagrams below — *the day-1 setup* and *the day-2 magic*.
