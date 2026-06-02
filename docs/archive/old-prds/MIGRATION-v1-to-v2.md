@@ -1,3 +1,8 @@
+> [!WARNING]
+> Historical document.
+> This file is preserved for context only and is not the current runbook.
+> Start with: [project README](../../../README.md) and [v4 vs v5](../../v4-vs-v5.md).
+
 # Migration: pvc-plumber v1 → v2
 
 > Audience: anyone running `ghcr.io/mitchross/pvc-plumber:1.x` (most likely
@@ -9,7 +14,7 @@
 > smaller in scope: drop the `mutate-batch-v1-job` webhook, switch the
 > Kopia repo from filesystem to S3, no RBAC changes, no new cluster
 > dependencies. The full migration guide lives in
-> [`CHANGELOG.md`](CHANGELOG.md) under `[3.0.0] § Migration guide`. Quirks
+> [`CHANGELOG.md`](../../../CHANGELOG.md) under `[3.0.0] § Migration guide`. Quirks
 > #1, #2, and #3 in [§ 5 below](#5-known-v2-quirks-fixed-in-v3) are
 > resolved in v3.0.0 (the `1password` / `rustfs` / `kopia_password`
 > hardcodes became env-var-overridable defaults).
@@ -270,9 +275,9 @@ If all of those pass, the migration is complete.
 
 ## See also
 
-- [`CHANGELOG.md`](CHANGELOG.md) — full v2.0.0 change list and the
+- [`CHANGELOG.md`](../../../CHANGELOG.md) — full v2.0.0 change list and the
   unreleased v2.1 contract additions.
-- [`README.md`](README.md) — runtime configuration reference (env vars,
+- [`README.md`](../../../README.md) — runtime configuration reference (env vars,
   HTTP endpoints, deployment examples).
-- [Restore decision flow](docs/restore-decision-flow.md) — the boxes-and-arrows
+- [Restore decision flow](../historical-design/restore-decision-flow-v1-v2.md) — the boxes-and-arrows
   of how `/exists` decisions translate into PVC behaviour.

@@ -1,3 +1,8 @@
+> [!WARNING]
+> Historical document.
+> This file is preserved for context only and is not the current runbook.
+> Start with: [project README](../../../README.md) and [v4 vs v5](../../v4-vs-v5.md).
+
 # Admission Webhooks Deep Dive
 
 > **TL;DR for presenters** *(grab any of these if asked "how do the webhooks actually work?")*
@@ -119,10 +124,10 @@ hookSrv.Register("/mutate-batch-v1-job", &webhook.Admission{
 
 ## Handler 1 — PVCMutator (`/mutate-v1-pvc`)
 
-**Source**: [`internal/webhook/pvc_mutate.go::Handle`](../internal/webhook/pvc_mutate.go).
+**Source**: [`internal/webhook/pvc_mutate.go::Handle`](../../../internal/webhook/pvc_mutate.go).
 **Purpose**: inject `spec.dataSourceRef` when pvc-plumber sees an authoritative restore decision.
 **Failure modes**: handler-level fail-OPEN. Cluster-level `failurePolicy: Fail`.
-**Tested in**: [`internal/webhook/pvc_mutate_test.go`](../internal/webhook/pvc_mutate_test.go) (10 cases covering restore / fresh / error / skip-restore / system-namespace / dataSourceRef-preset / etc).
+**Tested in**: [`internal/webhook/pvc_mutate_test.go`](../../../internal/webhook/pvc_mutate_test.go) (10 cases covering restore / fresh / error / skip-restore / system-namespace / dataSourceRef-preset / etc).
 
 ### `Handle()` step by step
 
@@ -257,7 +262,7 @@ The two diagrams together describe one cooperating safety net: the mutator never
 
 ### Test fixtures (all green)
 
-Read [`internal/webhook/pvc_mutate_test.go`](../internal/webhook/pvc_mutate_test.go) for the canonical exercises:
+Read [`internal/webhook/pvc_mutate_test.go`](../../../internal/webhook/pvc_mutate_test.go) for the canonical exercises:
 
 | Test | What it verifies |
 |---|---|
@@ -274,10 +279,10 @@ Read [`internal/webhook/pvc_mutate_test.go`](../internal/webhook/pvc_mutate_test
 
 ## Handler 2 — PVCValidator (`/validate-v1-pvc`)
 
-**Source**: [`internal/webhook/pvc_validate.go::Handle`](../internal/webhook/pvc_validate.go).
+**Source**: [`internal/webhook/pvc_validate.go::Handle`](../../../internal/webhook/pvc_validate.go).
 **Purpose**: deny unsafe PVC creates — three independent denial branches.
 **Failure modes**: handler-level fail-CLOSED. Cluster-level `failurePolicy: Fail`.
-**Tested in**: [`internal/webhook/pvc_validate_test.go`](../internal/webhook/pvc_validate_test.go) (12 cases).
+**Tested in**: [`internal/webhook/pvc_validate_test.go`](../../../internal/webhook/pvc_validate_test.go) (12 cases).
 
 ### `Handle()` step by step
 
@@ -389,7 +394,7 @@ The two layers protect against different failure modes:
 
 ### Test fixtures (all green)
 
-Read [`internal/webhook/pvc_validate_test.go`](../internal/webhook/pvc_validate_test.go):
+Read [`internal/webhook/pvc_validate_test.go`](../../../internal/webhook/pvc_validate_test.go):
 
 | Test | What it verifies |
 |---|---|
@@ -408,10 +413,10 @@ Read [`internal/webhook/pvc_validate_test.go`](../internal/webhook/pvc_validate_
 
 ## Handler 3 — JobMutator (`/mutate-batch-v1-job`)
 
-**Source**: [`internal/webhook/job_mutate.go::Handle`](../internal/webhook/job_mutate.go).
+**Source**: `internal/webhook/job_mutate.go::Handle` (removed in v3).
 **Purpose**: inject the NFS Kopia repository (volume + per-container mount) into VolSync mover Jobs.
 **Failure modes**: handler-level never-denies. Cluster-level `failurePolicy: Ignore`.
-**Tested in**: [`internal/webhook/job_mutate_test.go`](../internal/webhook/job_mutate_test.go) (5 cases).
+**Tested in**: `internal/webhook/job_mutate_test.go` (removed in v3) (5 cases).
 
 ### `Handle()` step by step
 
@@ -679,9 +684,9 @@ Earlier in PR #3 development, the env var was replace-style — setting `SYSTEM_
 
 ## See also
 
-- [`docs/architecture.md`](architecture.md) — full architectural overview.
-- [`docs/reconciler.md`](reconciler.md) — the reconciler side of the operator.
-- [`docs/restore-decision-flow.md`](restore-decision-flow.md) — the underlying restore/fresh/unknown contract.
-- [`MIGRATION-v1-to-v2.md`](../MIGRATION-v1-to-v2.md) — operational migration guide; § 2.5 covers the namespace exclusion review explicitly.
-- Source: [`internal/webhook/pvc_mutate.go`](../internal/webhook/pvc_mutate.go), [`internal/webhook/pvc_validate.go`](../internal/webhook/pvc_validate.go), [`internal/webhook/job_mutate.go`](../internal/webhook/job_mutate.go).
-- Tests: [`internal/webhook/pvc_mutate_test.go`](../internal/webhook/pvc_mutate_test.go), [`internal/webhook/pvc_validate_test.go`](../internal/webhook/pvc_validate_test.go), [`internal/webhook/job_mutate_test.go`](../internal/webhook/job_mutate_test.go).
+- [`docs/architecture.md`](architecture-v2.md) — full architectural overview.
+- [`docs/reconciler.md`](reconciler-v2.md) — the reconciler side of the operator.
+- [`docs/restore-decision-flow.md`](restore-decision-flow-v1-v2.md) — the underlying restore/fresh/unknown contract.
+- [`MIGRATION-v1-to-v2.md`](../old-prds/MIGRATION-v1-to-v2.md) — operational migration guide; § 2.5 covers the namespace exclusion review explicitly.
+- Source: [`internal/webhook/pvc_mutate.go`](../../../internal/webhook/pvc_mutate.go), [`internal/webhook/pvc_validate.go`](../../../internal/webhook/pvc_validate.go), `internal/webhook/job_mutate.go` (removed in v3).
+- Tests: [`internal/webhook/pvc_mutate_test.go`](../../../internal/webhook/pvc_mutate_test.go), [`internal/webhook/pvc_validate_test.go`](../../../internal/webhook/pvc_validate_test.go), `internal/webhook/job_mutate_test.go` (removed in v3).

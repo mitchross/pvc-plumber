@@ -1,8 +1,13 @@
+> [!WARNING]
+> Historical document.
+> This file is preserved for context only and is not the current runbook.
+> Start with: [project README](../../../README.md) and [v4 vs v5](../../v4-vs-v5.md).
+
 # pvc-plumber, explained for homelabbers
 
 The conversational-explainer companion to the technical docs in this folder
-([architecture.md](architecture.md), [admission-webhooks.md](admission-webhooks.md),
-[reconciler.md](reconciler.md)). If you're new to the project, start here. The
+([architecture.md](architecture-v2.md), [admission-webhooks.md](admission-webhooks-v2.md),
+[reconciler.md](reconciler-v2.md)). If you're new to the project, start here. The
 deeper docs assume you've already mapped the pieces this one walks through.
 
 This is the "what is pvc-plumber, how does it actually work, and why does it
@@ -433,13 +438,13 @@ pvc-plumber co-deploy `kopia-ui` for browser-based snapshot inspection).
 
 ## Where to go deeper
 
-- [architecture.md](architecture.md) — sequence diagrams, design
+- [architecture.md](architecture-v2.md) — sequence diagrams, design
   decisions, the four-part binary in detail.
-- [admission-webhooks.md](admission-webhooks.md) — handler walkthroughs
+- [admission-webhooks.md](admission-webhooks-v2.md) — handler walkthroughs
   for each webhook.
-- [reconciler.md](reconciler.md) — the controller-side deep dive.
+- [reconciler.md](reconciler-v2.md) — the controller-side deep dive.
 - [../README.md](../README.md) — env vars, deployment YAML,
   troubleshooting recipes.
-- [../CHANGELOG.md](../CHANGELOG.md) — what changed in each release.
-- [../MIGRATION-v1-to-v2.md](../MIGRATION-v1-to-v2.md) — upgrade guide
+- [../CHANGELOG.md](../../../CHANGELOG.md) — what changed in each release.
+- [../MIGRATION-v1-to-v2.md](../old-prds/MIGRATION-v1-to-v2.md) — upgrade guide
   from the legacy HTTP-only v1 deployment shape.

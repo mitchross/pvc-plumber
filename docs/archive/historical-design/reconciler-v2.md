@@ -1,3 +1,8 @@
+> [!WARNING]
+> Historical document.
+> This file is preserved for context only and is not the current runbook.
+> Start with: [project README](../../../README.md) and [v4 vs v5](../../v4-vs-v5.md).
+
 # PVC Reconciler Deep Dive
 
 > **TL;DR for presenters** *(grab any of these if asked "what does the controller actually do?")*
@@ -53,7 +58,7 @@ If you want to dig deeper into the framework, [The Kubebuilder Book](https://boo
 
 ## `Reconcile()` step by step
 
-**Source**: [`internal/controller/pvc_controller.go::Reconcile`](../internal/controller/pvc_controller.go).
+**Source**: [`internal/controller/pvc_controller.go::Reconcile`](../../../internal/controller/pvc_controller.go).
 
 ```go
 func (r *PVCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -333,7 +338,7 @@ For testing: `internal/controller/pvc_controller_test.go::TestReconcile_BoundYou
 
 ## The `cleanup()` reaper
 
-**Source**: [`internal/controller/pvc_controller.go::cleanup`](../internal/controller/pvc_controller.go).
+**Source**: [`internal/controller/pvc_controller.go::cleanup`](../../../internal/controller/pvc_controller.go).
 
 ```go
 func (r *PVCReconciler) cleanup(ctx context.Context, namespace, name string) error {
@@ -485,8 +490,8 @@ The window is typically <1s. The operator's `Get-or-Create` idempotency means re
 
 ## See also
 
-- [`docs/architecture.md`](architecture.md) — the wider operator architecture this loop fits into.
-- [`docs/admission-webhooks.md`](admission-webhooks.md) — the admission side of the operator (the `dataSourceRef` injection that depends on the RD this reconciler creates).
-- [`docs/restore-decision-flow.md`](restore-decision-flow.md) — the underlying tri-state restore/fresh/unknown contract.
-- Source: [`internal/controller/pvc_controller.go`](../internal/controller/pvc_controller.go).
-- Tests: [`internal/controller/pvc_controller_test.go`](../internal/controller/pvc_controller_test.go).
+- [`docs/architecture.md`](architecture-v2.md) — the wider operator architecture this loop fits into.
+- [`docs/admission-webhooks.md`](admission-webhooks-v2.md) — the admission side of the operator (the `dataSourceRef` injection that depends on the RD this reconciler creates).
+- [`docs/restore-decision-flow.md`](restore-decision-flow-v1-v2.md) — the underlying tri-state restore/fresh/unknown contract.
+- Source: [`internal/controller/pvc_controller.go`](../../../internal/controller/pvc_controller.go).
+- Tests: [`internal/controller/pvc_controller_test.go`](../../../internal/controller/pvc_controller_test.go).

@@ -1,3 +1,8 @@
+> [!WARNING]
+> Historical document.
+> This file is preserved for context only and is not the current runbook.
+> Start with: [project README](../../../README.md) and [v4 vs v5](../../v4-vs-v5.md).
+
 # PVC Restore Decision Flow
 
 This service answers one admission-time question:

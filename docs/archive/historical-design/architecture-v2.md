@@ -1,3 +1,8 @@
+> [!WARNING]
+> Historical document.
+> This file is preserved for context only and is not the current runbook.
+> Start with: [project README](../../../README.md) and [v4 vs v5](../../v4-vs-v5.md).
+
 # pvc-plumber Architecture
 
 > **TL;DR for presenters** *(grab any of these if someone asks "tell me about pvc-plumber")*
@@ -361,7 +366,7 @@ graph LR
 | `/validate-v1-pvc` | PVC | `Fail` | fail-CLOSED | Don't admit empty volumes over restorable data |
 | `/mutate-batch-v1-job` | Job | `Ignore` | never denies | A webhook outage shouldn't wedge VolSync entirely |
 
-For the full handler-by-handler walkthrough see [`docs/admission-webhooks.md`](admission-webhooks.md). The architectural summary:
+For the full handler-by-handler walkthrough see [`docs/admission-webhooks.md`](admission-webhooks-v2.md). The architectural summary:
 
 ### `/mutate-v1-pvc` — PVCMutator
 
@@ -527,7 +532,7 @@ flowchart TB
 
 *Three exits: requeue in 30s if Longhorn is still binding, requeue at the 2h mark if the PVC is too young to start backups, or land the `ReplicationSource` and stop. controller-runtime collapses overlapping `RequeueAfter` requests so we don't accumulate timers.*
 
-Source: [`internal/controller/pvc_controller.go::Reconcile`](../internal/controller/pvc_controller.go).
+Source: [`internal/controller/pvc_controller.go::Reconcile`](../../../internal/controller/pvc_controller.go).
 
 The three "ensure" helpers are all the same shape — Get-or-Create, never Update:
 
@@ -546,7 +551,7 @@ func (r *PVCReconciler) ensureReplicationSource(ctx context.Context, pvc *corev1
 
 *If the resource is already there, the reconciler considers its job done. If not, it creates the resource with the operator's preferred shape. No diff, no merge, no drift correction.*
 
-This is on purpose — operators can hand-tweak retention counts or schedule offsets without the controller stomping on them. The trade-offs are spelled out in [`docs/reconciler.md`](reconciler.md#get-or-create-idempotency-rationale).
+This is on purpose — operators can hand-tweak retention counts or schedule offsets without the controller stomping on them. The trade-offs are spelled out in [`docs/reconciler.md`](reconciler-v2.md#get-or-create-idempotency-rationale).
 
 **The schedule formula**:
 
@@ -586,7 +591,7 @@ flowchart LR
 
 *Both errors mean "the thing you're trying to delete doesn't exist, and that's fine". Anything else propagates as a real error.*
 
-Source: [`internal/controller/pvc_controller.go::cleanup`](../internal/controller/pvc_controller.go).
+Source: [`internal/controller/pvc_controller.go::cleanup`](../../../internal/controller/pvc_controller.go).
 
 **Why label-based reaping** (not owner references):
 
@@ -728,7 +733,7 @@ This list is hardcoded in `cmd/operator/main.go::defaultSystemNamespaces` AND mu
 
 VolSync's `ReplicationSource`/`ReplicationDestination` references a Kopia password Secret in its own namespace. Kubernetes doesn't let you share a Secret across namespaces. We could ship the password material into every namespace via a SealedSecret, but rotating the password would mean touching every namespace's git history. Per-PVC `ExternalSecret` (rendered by ESO from a `ClusterSecretStore`) keeps the password material in one place — rotating it propagates automatically.
 
-**Known v3 quirk**: the operator hardcodes `secretStoreRef.name=1password` and `remoteRef.key=rustfs property=kopia_password` in `ensureExternalSecret`. v3 will make these configurable. Documented in [`MIGRATION-v1-to-v2.md`](../MIGRATION-v1-to-v2.md#5-known-v2-quirks-fixed-in-v3).
+**Known v3 quirk**: the operator hardcodes `secretStoreRef.name=1password` and `remoteRef.key=rustfs property=kopia_password` in `ensureExternalSecret`. v3 will make these configurable. Documented in [`MIGRATION-v1-to-v2.md`](../old-prds/MIGRATION-v1-to-v2.md#5-known-v2-quirks-fixed-in-v3).
 
 ### Why sidecar injection on VolSync mover Jobs
 
@@ -759,8 +764,8 @@ Honest list of what's out of scope. If a viewer asks "does it also…", these ar
 ## See also
 
 - [`README.md`](../README.md) — start here for orientation, image tags, basic usage.
-- [`docs/admission-webhooks.md`](admission-webhooks.md) — handler-by-handler code walkthrough.
-- [`docs/reconciler.md`](reconciler.md) — reconcile loop deep dive.
-- [`docs/restore-decision-flow.md`](restore-decision-flow.md) — the original v1 tri-state decision model. The webhook handlers in v2 implement the same `restore` / `fresh` / `unknown` decisions; this doc explains the underlying contract.
-- [`MIGRATION-v1-to-v2.md`](../MIGRATION-v1-to-v2.md) — operational steps to move from v1 (HTTP service + Kyverno policies) to v2 (operator).
-- [`CHANGELOG.md`](../CHANGELOG.md) — version-by-version change list.
+- [`docs/admission-webhooks.md`](admission-webhooks-v2.md) — handler-by-handler code walkthrough.
+- [`docs/reconciler.md`](reconciler-v2.md) — reconcile loop deep dive.
+- [`docs/restore-decision-flow.md`](restore-decision-flow-v1-v2.md) — the original v1 tri-state decision model. The webhook handlers in v2 implement the same `restore` / `fresh` / `unknown` decisions; this doc explains the underlying contract.
+- [`MIGRATION-v1-to-v2.md`](../old-prds/MIGRATION-v1-to-v2.md) — operational steps to move from v1 (HTTP service + Kyverno policies) to v2 (operator).
+- [`CHANGELOG.md`](../../../CHANGELOG.md) — version-by-version change list.

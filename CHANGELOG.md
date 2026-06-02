@@ -405,7 +405,7 @@ Tracked in the `v2.1-cheap-wins` branch (PR #4).
 ## [2.0.0] — 2026-05-07
 
 > 🚨 **THIS IS A MAJOR BREAKING RELEASE.**
-> Before bumping from any `1.x` tag, read [`MIGRATION-v1-to-v2.md`](MIGRATION-v1-to-v2.md).
+> Before bumping from any `1.x` tag, read [`MIGRATION-v1-to-v2.md`](docs/archive/old-prds/MIGRATION-v1-to-v2.md).
 > The deployment surface has changed substantially — new cluster-level
 > dependencies, new RBAC, new admission webhooks with `failurePolicy: Fail`.
 > Image: `ghcr.io/mitchross/pvc-plumber:2.0.0`.
@@ -480,7 +480,7 @@ Tracked in the `v2.1-cheap-wins` branch (PR #4).
   one cache instance.
 - **`SYSTEM_NAMESPACES` env var (CSV, additive).** Always seeded with the
   9-entry deadlock-prevention default; env entries are added on top, never
-  replace. See [v3 spec § 3.4](MIGRATION-v1-to-v2.md#known-v2-quirks-fixed-in-v3).
+  replace. See [v3 spec § 3.4](docs/archive/old-prds/MIGRATION-v1-to-v2.md#known-v2-quirks-fixed-in-v3).
 - **`NFS_SERVER` and `NFS_PATH` env vars.** Coordinates of the shared Kopia
   repository injected by the Job mutating webhook. Defaults
   (`192.168.10.133` and `/mnt/BigTank/k8s/volsync-kopia-nfs`) match the
