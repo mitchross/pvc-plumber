@@ -46,6 +46,7 @@ flowchart LR
 | `/audit` endpoint (parity/ownership truth) | ✅ | see [audit-api.md](audit-api.md) |
 | **Cluster-wide** `ClusterRoleBinding pvc-plumber:volsync-writer` | ✅ | one binding, RS/RD verbs; no per-namespace RoleBindings |
 | Permissive mode (warn, never deny) | ✅ | the only mode used in prod |
+| No Prometheus dependency in core | ✅ | observability is optional and belongs outside core bootstrap |
 | Admission **webhooks** (mutate/validate) | ❌ | **not deployed** in v4 |
 | Inject `dataSourceRef` at admission | ❌ | the *PVC manifest in Git* carries the dsr; the operator does not inject it |
 | Backup-truth **cache** (strict stale detection) | ❌ | design only |
@@ -90,3 +91,16 @@ behind a written PRD amendment + a passing failure-matrix drill, and is **not** 
 - **Full metrics + events** for every decision.
 
 None of these are live. Treat the other design docs as **the destination**, this doc as **the map of where we actually are**.
+
+## Current Exclusions
+
+- CNPG uses native Barman/S3 and must not be generic-migrated.
+- Redis is backup-exempt and disposable.
+- PostHog is backup-exempt and disposable.
+
+## Related Docs
+
+- [Operator workflow](operator-workflow.md)
+- [Safety model](safety-model.md)
+- [`/audit` API](audit-api.md)
+- [Historical archive](archive/README.md)

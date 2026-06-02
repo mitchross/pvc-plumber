@@ -92,4 +92,7 @@ PVCs the operator deprioritizes — it just means the cached evaluation is older
 1. `summary.by_action.needs-human-review` should be **0**. If not, investigate those entries.
 2. Every PVC you expect managed should be `already-matches` / `managed-by-pvc-plumber` / `label_source=v4` / `stale=false`.
 3. `write-gate-missing > 0` means an opted-in PVC is in an ungated namespace — add the namespace label.
-4. `inline-argo` entries are Git-owned (e.g. an intentionally-deferred PVC) — leave them.
+4. `inline-argo` entries are historical Git-owned resources — leave them for explicit review.
+
+Redis and PostHog are backup-exempt disposable data. CNPG uses native
+Barman/S3 and must not be generic-migrated.
