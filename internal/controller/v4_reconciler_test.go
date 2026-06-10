@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/mitchross/pvc-plumber/internal/v4/auditclient"
+	"github.com/mitchross/pvc-plumber/internal/v4/builder"
 	v4labels "github.com/mitchross/pvc-plumber/internal/v4/labels"
 	"github.com/mitchross/pvc-plumber/internal/v4/mode"
 	"github.com/mitchross/pvc-plumber/internal/v4/naming"
@@ -1672,4 +1673,79 @@ func TestV4Reconcile_NamespaceManaged_AllowsWrite(t *testing.T) {
 	if entry.Action != ActionWouldCreate {
 		t.Errorf("Action: got %q, want %q (managed namespace must allow the write path)", entry.Action, ActionWouldCreate)
 	}
+}
+
+// =============================================================================
+// Schedule-drift detection (v4.0.2 — 2026-06-09 review finding B2)
+// =============================================================================
+
+// Schedule drift on an operator-owned RS must surface as would-update and
+// be repaired in permissive mode. Regression for the 2026-06-09 review
+// finding: observeCurrent never captured spec.trigger.schedule, so a
+// pvc-plumber.io/tier change (or hand-edited RS) stayed already-matches
+// forever.
+func TestV4Reconcile_Permissive_ScheduleDrift_Repaired(t *testing.T) {
+	pvc := makePVC(testNSMyapp, testPVCName, map[string]string{
+		v4labels.LabelEnabled:       "true",
+		v4labels.LabelManageVolSync: "true",
+		v4labels.LabelTier:          "daily",
+	}, nil)
+	rs := makeRS(testNSMyapp, testPVCName, v4labels.LabelManagedByValue,
+		naming.DefaultRepoSecretName, testPVCName)
+	// Wrong schedule: simulates a stale cadence after a tier change.
+	_ = unstructured.SetNestedField(rs.Object, "59 23 * * 6", "spec", "trigger", "schedule")
+	rd := makeRD(testNSMyapp, testPVCName+"-dst", v4labels.LabelManagedByValue,
+		naming.DefaultRepoSecretName)
+
+	f := newV4ModeFixture(t, mode.Permissive, pvc, rs, rd)
+	entry := f.reconcile(testNSMyapp, testPVCName)
+
+	if entry.Action != ActionWouldUpdate {
+		t.Fatalf("Action: got %q, want %q (schedule drift must be detected)",
+			entry.Action, ActionWouldUpdate)
+	}
+	if entry.Current.RSSchedule != "59 23 * * 6" {
+		t.Errorf("Current.RSSchedule: got %q, want the live drifted schedule", entry.Current.RSSchedule)
+	}
+	// updateOps rewrites both children.
+	f.assertDidWriteByVerb(t, 0, 2, 0)
+
+	// The live RS must now carry the builder's expected daily schedule.
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(rsGVK)
+	if err := f.fake.Get(context.Background(),
+		types.NamespacedName{Namespace: testNSMyapp, Name: testPVCName}, live); err != nil {
+		t.Fatalf("get live RS: %v", err)
+	}
+	got, _, _ := unstructured.NestedString(live.Object, "spec", "trigger", "schedule")
+	want := builder.ScheduleFor(testNSMyapp, testPVCName, v4labels.TierDaily)
+	if got != want {
+		t.Errorf("live RS schedule after repair: got %q, want %q", got, want)
+	}
+}
+
+// The matching case must NOT regress to a false-positive would-update:
+// an operator-owned RS already carrying the builder's schedule stays
+// already-matches with zero writes.
+func TestV4Reconcile_Permissive_ScheduleMatches_AlreadyMatches(t *testing.T) {
+	pvc := makePVC(testNSMyapp, testPVCName, map[string]string{
+		v4labels.LabelEnabled:       "true",
+		v4labels.LabelManageVolSync: "true",
+		v4labels.LabelTier:          "daily",
+	}, nil)
+	rs := makeRS(testNSMyapp, testPVCName, v4labels.LabelManagedByValue,
+		naming.DefaultRepoSecretName, testPVCName)
+	_ = unstructured.SetNestedField(rs.Object,
+		builder.ScheduleFor(testNSMyapp, testPVCName, v4labels.TierDaily),
+		"spec", "trigger", "schedule")
+	rd := makeRD(testNSMyapp, testPVCName+"-dst", v4labels.LabelManagedByValue,
+		naming.DefaultRepoSecretName)
+
+	f := newV4ModeFixture(t, mode.Permissive, pvc, rs, rd)
+	entry := f.reconcile(testNSMyapp, testPVCName)
+
+	if entry.Action != ActionAlreadyMatches {
+		t.Fatalf("Action: got %q, want %q", entry.Action, ActionAlreadyMatches)
+	}
+	f.assertDidWriteByVerb(t, 0, 0, 0)
 }

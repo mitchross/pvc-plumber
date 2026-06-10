@@ -259,6 +259,12 @@ type CurrentState struct {
 	RSManagedBy  string `json:"rs_managed_by,omitempty"`
 	RSRepository string `json:"rs_repository,omitempty"`
 	RSSourcePVC  string `json:"rs_source_pvc,omitempty"`
+	// RSSchedule is the live spec.trigger.schedule on the observed RS.
+	// Captured since v4.0.2 so the planner's schedule-drift comparison
+	// has real input (the 2026-06-09 review found tier changes were
+	// silently ignored because this was never read). Additive /audit
+	// JSON field.
+	RSSchedule string `json:"rs_schedule,omitempty"`
 
 	RDPresent    bool   `json:"rd_present"`
 	RDName       string `json:"rd_name,omitempty"`

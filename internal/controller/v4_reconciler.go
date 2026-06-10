@@ -582,13 +582,10 @@ func toExecutionResultSummary(r executor.Result) ExecutionResultSummary {
 }
 
 // toPlannerCurrent translates the controller-package CurrentState into
-// the planner's mirrored type. RSSchedule is intentionally left empty
-// for Patch 6.5: observeCurrent does not read spec.trigger.schedule yet,
-// so the planner's schedule-drift check is skipped. There are no
-// operator-owned RS/RD in the cluster at this point in the rollout, so
-// schedule drift has no real-world input today. Add RSSchedule capture
-// alongside (or just before) executor work in Patch 6.6 / 6.7 if drift
-// detection becomes load-bearing for the karakeep canary or beyond.
+// the planner's mirrored type. RSSchedule is captured since v4.0.2 so
+// the planner's schedule-drift check (shapeMatches) has real input —
+// before that, tier changes on live operator-owned RS were silently
+// ignored (2026-06-09 review finding).
 func toPlannerCurrent(c CurrentState) planner.CurrentState {
 	return planner.CurrentState{
 		RSPresent:    c.RSPresent,
@@ -596,6 +593,7 @@ func toPlannerCurrent(c CurrentState) planner.CurrentState {
 		RSManagedBy:  c.RSManagedBy,
 		RSRepository: c.RSRepository,
 		RSSourcePVC:  c.RSSourcePVC,
+		RSSchedule:   c.RSSchedule,
 		RDPresent:    c.RDPresent,
 		RDName:       c.RDName,
 		RDManagedBy:  c.RDManagedBy,
@@ -693,6 +691,7 @@ func (r *V4AuditReconciler) observeCurrent(ctx context.Context, namespace string
 		cur.RSManagedBy = rs.GetLabels()[managedByLabel]
 		cur.RSRepository, _, _ = unstructured.NestedString(rs.Object, "spec", "kopia", "repository")
 		cur.RSSourcePVC, _, _ = unstructured.NestedString(rs.Object, "spec", "sourcePVC")
+		cur.RSSchedule, _, _ = unstructured.NestedString(rs.Object, "spec", "trigger", "schedule")
 	} else if !apierrors.IsNotFound(err) {
 		if meta.IsNoMatchError(err) {
 			logger.V(1).Info("v4 audit: VolSync ReplicationSource CRD not installed; treating as not-present")
