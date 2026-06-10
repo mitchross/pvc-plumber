@@ -317,10 +317,28 @@ func PlanFor(in Inputs) Plan {
 	return plan
 }
 
-// inertAnnotationNotes surfaces recognized-but-unenforced annotations.
-// Populated in the v4.0.2 hardening pass (Task 4); empty until then.
+// inertAnnotationNotes discloses annotations the parser recognizes but
+// the v4 permissive reconciler does not enforce (their consumers —
+// sourcegate, decision engine, admission webhooks — only wire under
+// enforce/strict, which validateMode rejects in v4). Without these
+// notes a user setting min-backup-age believes protection exists when
+// it does not (2026-06-09 review).
 func inertAnnotationNotes(in Inputs) []string {
-	return nil
+	const suffix = " is recognized but not enforced in v4 permissive mode (v5 design-only)"
+	var notes []string
+	if in.Spec.MinBackupAgeSet {
+		notes = append(notes, labels.AnnotationMinBackupAge+suffix)
+	}
+	if in.Spec.SkipRestore {
+		notes = append(notes, labels.AnnotationSkipRestore+suffix)
+	}
+	if in.Spec.Mode != "" {
+		notes = append(notes, labels.AnnotationMode+suffix)
+	}
+	if in.Spec.RestoreMode != "" {
+		notes = append(notes, labels.AnnotationRestoreMode+suffix)
+	}
+	return notes
 }
 
 // planWriteEligible covers rules 6a–6h. The PVC has both

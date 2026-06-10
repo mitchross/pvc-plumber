@@ -2,7 +2,9 @@ package planner
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -887,5 +889,51 @@ func TestPlanFor_UnspecifiedTier_NotesDefault(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Notes missing default-tier note; got %v", plan.Notes)
+	}
+}
+
+// v5-surface annotations parse cleanly but are NOT enforced by the v4
+// permissive reconciler. /audit must disclose that instead of letting
+// the user believe min-backup-age protection exists (2026-06-09 review).
+func TestPlanFor_InertV5Annotations_Noted(t *testing.T) {
+	in := withEnabledManage()
+	in.Owner = OwnerPVCPlumber
+	in.Current = matchingCurrent(in, "pvc-plumber")
+	in.Spec.MinBackupAgeSet = true
+	in.Spec.MinBackupAge = 2 * time.Hour
+	in.Spec.SkipRestore = true
+	in.Spec.SkipRestoreReason = "test"
+	in.Spec.Mode = "strict"
+	in.Spec.RestoreMode = "strict"
+
+	plan := PlanFor(in)
+
+	wantFragments := []string{
+		labels.AnnotationMinBackupAge,
+		labels.AnnotationSkipRestore,
+		labels.AnnotationMode,
+		labels.AnnotationRestoreMode,
+	}
+	for _, frag := range wantFragments {
+		found := false
+		for _, n := range plan.Notes {
+			if strings.Contains(n, frag) && strings.Contains(n, "not enforced") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("Notes missing inert-annotation disclosure for %s; got %v", frag, plan.Notes)
+		}
+	}
+}
+
+// No annotations set → no inert-annotation noise.
+func TestPlanFor_NoV5Annotations_NoInertNotes(t *testing.T) {
+	in := withEnabledManage()
+	plan := PlanFor(in)
+	for _, n := range plan.Notes {
+		if strings.Contains(n, "not enforced") {
+			t.Errorf("unexpected inert-annotation note on clean spec: %q", n)
+		}
 	}
 }
