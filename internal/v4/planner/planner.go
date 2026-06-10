@@ -548,14 +548,24 @@ func shapeMatches(in Inputs) bool {
 	if in.Current.RSSourcePVC != "" && in.Current.RSSourcePVC != in.PVCName {
 		return false
 	}
-	// Only check schedule drift for operator-owned resources — the
-	// reconciler only populates RSSchedule in that case, and we don't
-	// want incidental schedule differences on inline-argo resources to
-	// count as drift (we'd never patch them anyway).
-	if in.Owner == OwnerPVCPlumber && in.Current.RSSchedule != "" {
-		expectedSchedule := builder.ScheduleFor(in.Namespace, in.PVCName, in.Spec.Tier)
-		if in.Current.RSSchedule != expectedSchedule {
-			return false
+	// Schedule rules apply only to operator-owned resources — incidental
+	// schedule differences on inline-argo resources must not count as
+	// drift (we'd never patch them anyway).
+	if in.Owner == OwnerPVCPlumber {
+		if in.Spec.Tier == labels.TierManual {
+			// Manual tier renders trigger.manual with NO cron; any
+			// leftover cron schedule is drift. This matters because
+			// ScheduleFor's manual fallback equals the daily cron, so a
+			// daily→manual flip would otherwise read as "matching" and
+			// never be repaired (2026-06-09 review).
+			if in.Current.RSSchedule != "" {
+				return false
+			}
+		} else if in.Current.RSSchedule != "" {
+			expectedSchedule := builder.ScheduleFor(in.Namespace, in.PVCName, in.Spec.Tier)
+			if in.Current.RSSchedule != expectedSchedule {
+				return false
+			}
 		}
 	}
 	return true

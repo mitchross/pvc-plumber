@@ -23,10 +23,14 @@ import (
 //   - hourly:   "<m> * * * *"             — every hour at minute m
 //   - daily:    "<m> 2 * * *"             — 02:m every day
 //   - weekly:   "<m> 2 * * 0"             — 02:m on Sunday
-//   - manual:   "<m> 2 * * *"             — daily fallback; the planner
-//     decides whether to actually run an RS for manual tier
+//   - manual:   "<m> 2 * * *"             — daily-format fallback, NOT
+//     rendered into RS specs; BuildRS gives TierManual a
+//     spec.trigger.manual instead. This return value exists only so
+//     ScheduleFor stays total.
 //   - disabled: "<m> 2 * * *"             — same fallback; planner suppresses
-//   - unspecified: "<m> 2 * * *"          — daily fallback for unset/parse-error
+//     the RS entirely
+//   - unspecified: "<m> 2 * * *"          — daily fallback for unset tier
+//     (the planner surfaces a note that the default was applied)
 //
 // Pure: no I/O. The same (ns, pvc, tier) input always produces the
 // same output, which means callers can safely log the predicted

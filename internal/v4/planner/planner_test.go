@@ -7,6 +7,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/mitchross/pvc-plumber/internal/v4/builder"
 	"github.com/mitchross/pvc-plumber/internal/v4/labels"
 	"github.com/mitchross/pvc-plumber/internal/v4/naming"
 )
@@ -823,5 +824,44 @@ func TestPlanFor_TierDisabled_NamespaceNotManaged_NoDeleteOps(t *testing.T) {
 	}
 	if len(got.Ops) != 0 {
 		t.Errorf("Ops: got %d, want 0 (gate must block tier=disabled delete)", len(got.Ops))
+	}
+}
+
+// =============================================================================
+// Manual-tier schedule rules (v4.0.2 — 2026-06-09 review finding B3)
+// =============================================================================
+
+// A manual-tier PVC whose operator-owned RS still carries a cron
+// schedule (e.g. tier was daily, then flipped to manual) is drift and
+// must be repaired to the manual-trigger shape. Uses the file's
+// existing fixture helpers (withEnabledManage + matchingCurrent).
+func TestPlanFor_ManualTier_LeftoverCron_WouldUpdate(t *testing.T) {
+	in := withEnabledManage()
+	in.Owner = OwnerPVCPlumber
+	in.Current = matchingCurrent(in, "pvc-plumber")
+	in.Spec.Tier = labels.TierManual
+	// THE dangerous leftover: the PVC was tier=daily before the flip, so
+	// the live cron is exactly ScheduleFor(daily) — which equals
+	// ScheduleFor's manual fallback. A naive expected-schedule comparison
+	// reads this as "matching" and never repairs to the manual trigger.
+	in.Current.RSSchedule = builder.ScheduleFor(in.Namespace, in.PVCName, labels.TierDaily)
+
+	plan := PlanFor(in)
+	if plan.Action != ActionWouldUpdate {
+		t.Fatalf("Action: got %q, want %q", plan.Action, ActionWouldUpdate)
+	}
+}
+
+// A manual-tier RS with no cron (schedule empty) is the expected shape.
+func TestPlanFor_ManualTier_NoCron_AlreadyMatches(t *testing.T) {
+	in := withEnabledManage()
+	in.Owner = OwnerPVCPlumber
+	in.Current = matchingCurrent(in, "pvc-plumber")
+	in.Spec.Tier = labels.TierManual
+	in.Current.RSSchedule = ""
+
+	plan := PlanFor(in)
+	if plan.Action != ActionAlreadyMatches {
+		t.Fatalf("Action: got %q, want %q", plan.Action, ActionAlreadyMatches)
 	}
 }

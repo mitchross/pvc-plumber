@@ -100,6 +100,13 @@ const (
 	// that uses RWX for VolSync intermediate PVCs only edits this
 	// place.
 	accessModeRWO = "ReadWriteOnce"
+
+	// manualTriggerSeed is the static spec.trigger.manual value rendered
+	// for TierManual. VolSync fires one sync when it first appears, then
+	// only when the string changes — humans trigger a backup by patching
+	// it. NOTE: do not use spec.trigger == nil for "manual"; a VolSync RS
+	// with no trigger at all syncs CONTINUOUSLY.
+	manualTriggerSeed = "backup-on-demand"
 )
 
 // BuildRS constructs the desired ReplicationSource as an unstructured
@@ -135,12 +142,17 @@ func BuildRS(in Inputs) *unstructured.Unstructured {
 		"moverSecurityContext": moverSecurityContext(in),
 	}
 
+	trigger := map[string]interface{}{}
+	if in.Spec.Tier == labels.TierManual {
+		trigger["manual"] = manualTriggerSeed
+	} else {
+		trigger["schedule"] = ScheduleFor(in.Namespace, in.PVCName, in.Spec.Tier)
+	}
+
 	rs.Object["spec"] = map[string]interface{}{
 		"sourcePVC": in.PVCName,
-		"trigger": map[string]interface{}{
-			"schedule": ScheduleFor(in.Namespace, in.PVCName, in.Spec.Tier),
-		},
-		"kopia": kopia,
+		"trigger":   trigger,
+		"kopia":     kopia,
 	}
 	return rs
 }

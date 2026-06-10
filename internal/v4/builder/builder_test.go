@@ -442,3 +442,44 @@ func TestInt64ToStr(t *testing.T) {
 		t.Errorf("int64ToStr(7): got %q, want %q", got, "7")
 	}
 }
+
+// =============================================================================
+// Manual-tier trigger semantics (v4.0.2 — 2026-06-09 review finding B3)
+// =============================================================================
+
+// manual tier must NOT get a cron schedule — it gets a static manual
+// trigger a human bumps to fire a backup. Before v4.0.2 manual rendered
+// a daily cron (2026-06-09 review finding).
+func TestBuildRS_ManualTier_ManualTriggerNoCron(t *testing.T) {
+	in := Inputs{
+		Namespace: "myapp",
+		PVCName:   "data",
+		Spec:      labels.Spec{Tier: labels.TierManual},
+	}
+	rs := BuildRS(in)
+
+	manual, found, _ := unstructured.NestedString(rs.Object, "spec", "trigger", "manual")
+	if !found || manual != "backup-on-demand" {
+		t.Errorf("trigger.manual: got %q (found=%v), want \"backup-on-demand\"", manual, found)
+	}
+	if sched, found, _ := unstructured.NestedString(rs.Object, "spec", "trigger", "schedule"); found {
+		t.Errorf("trigger.schedule must be absent for manual tier, got %q", sched)
+	}
+}
+
+func TestBuildRS_DailyTier_CronNoManual(t *testing.T) {
+	in := Inputs{
+		Namespace: "myapp",
+		PVCName:   "data",
+		Spec:      labels.Spec{Tier: labels.TierDaily},
+	}
+	rs := BuildRS(in)
+
+	sched, found, _ := unstructured.NestedString(rs.Object, "spec", "trigger", "schedule")
+	if !found || sched != ScheduleFor("myapp", "data", labels.TierDaily) {
+		t.Errorf("trigger.schedule: got %q (found=%v), want the daily cron", sched, found)
+	}
+	if m, found, _ := unstructured.NestedString(rs.Object, "spec", "trigger", "manual"); found {
+		t.Errorf("trigger.manual must be absent for cron tiers, got %q", m)
+	}
+}
