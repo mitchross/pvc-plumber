@@ -1686,8 +1686,8 @@ func TestV4Reconcile_NamespaceManaged_AllowsWrite(t *testing.T) {
 // forever.
 func TestV4Reconcile_Permissive_ScheduleDrift_Repaired(t *testing.T) {
 	pvc := makePVC(testNSMyapp, testPVCName, map[string]string{
-		v4labels.LabelEnabled:       "true",
-		v4labels.LabelManageVolSync: "true",
+		v4labels.LabelEnabled:       labelTrue,
+		v4labels.LabelManageVolSync: labelTrue,
 		v4labels.LabelTier:          "daily",
 	}, nil)
 	rs := makeRS(testNSMyapp, testPVCName, v4labels.LabelManagedByValue,
@@ -1729,8 +1729,8 @@ func TestV4Reconcile_Permissive_ScheduleDrift_Repaired(t *testing.T) {
 // already-matches with zero writes.
 func TestV4Reconcile_Permissive_ScheduleMatches_AlreadyMatches(t *testing.T) {
 	pvc := makePVC(testNSMyapp, testPVCName, map[string]string{
-		v4labels.LabelEnabled:       "true",
-		v4labels.LabelManageVolSync: "true",
+		v4labels.LabelEnabled:       labelTrue,
+		v4labels.LabelManageVolSync: labelTrue,
 		v4labels.LabelTier:          "daily",
 	}, nil)
 	rs := makeRS(testNSMyapp, testPVCName, v4labels.LabelManagedByValue,

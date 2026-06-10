@@ -452,8 +452,8 @@ func TestInt64ToStr(t *testing.T) {
 // a daily cron (2026-06-09 review finding).
 func TestBuildRS_ManualTier_ManualTriggerNoCron(t *testing.T) {
 	in := Inputs{
-		Namespace: "myapp",
-		PVCName:   "data",
+		Namespace: tnsOpenWebUI,
+		PVCName:   tpvcStorage,
 		Spec:      labels.Spec{Tier: labels.TierManual},
 	}
 	rs := BuildRS(in)
@@ -469,14 +469,14 @@ func TestBuildRS_ManualTier_ManualTriggerNoCron(t *testing.T) {
 
 func TestBuildRS_DailyTier_CronNoManual(t *testing.T) {
 	in := Inputs{
-		Namespace: "myapp",
-		PVCName:   "data",
+		Namespace: tnsOpenWebUI,
+		PVCName:   tpvcStorage,
 		Spec:      labels.Spec{Tier: labels.TierDaily},
 	}
 	rs := BuildRS(in)
 
 	sched, found, _ := unstructured.NestedString(rs.Object, "spec", "trigger", "schedule")
-	if !found || sched != ScheduleFor("myapp", "data", labels.TierDaily) {
+	if !found || sched != ScheduleFor(tnsOpenWebUI, tpvcStorage, labels.TierDaily) {
 		t.Errorf("trigger.schedule: got %q (found=%v), want the daily cron", sched, found)
 	}
 	if m, found, _ := unstructured.NestedString(rs.Object, "spec", "trigger", "manual"); found {
