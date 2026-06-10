@@ -15,7 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> Hardening from the 2026-06-09 independent review; will ship as **v4.0.2**.
+## [4.0.2] — 2026-06-10
+
+> Hardening from the 2026-06-09 independent review.
+> Image: `ghcr.io/mitchross/pvc-plumber:4.0.2`.
+> **No deployment surface changes from v4.0.1** — RBAC, mode validation,
+> and webhook posture (none) are identical; this is reconciler/planner
+> behavior plus `/audit` additions.
 
 ### Fixed
 
