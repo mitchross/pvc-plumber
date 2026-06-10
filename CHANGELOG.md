@@ -15,6 +15,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> Hardening from the 2026-06-09 independent review; will ship as **v4.0.2**.
+
+### Fixed
+
+- `observeCurrent` captures `spec.trigger.schedule`; tier and schedule
+  drift on operator-owned ReplicationSources is now detected and repaired
+  (was: silently ignored forever — a `pvc-plumber.io/tier` change never
+  propagated). `/audit` entries gain `current.rs_schedule`.
+- `tier: manual` renders `spec.trigger.manual: backup-on-demand` (no cron);
+  it previously scheduled daily backups. A leftover cron on a manual-tier
+  operator-owned RS is repaired as drift — including the daily→manual flip,
+  where the old comparison read the leftover daily cron as "matching".
+
+### Added
+
+- `/audit` notes when a write-eligible PVC's tier is defaulted to daily
+  (no `pvc-plumber.io/tier` label).
+- `/audit` discloses recognized-but-unenforced v5 annotations
+  (`min-backup-age`, `skip-restore`, `mode`, `restore-mode`) instead of
+  accepting them silently.
+
+### Documentation
+
+- Reconciler header no longer claims pre-6.7-wire audit-only routing.
+- `docs/audit-api.md` gains tier-semantics and inert-annotation sections.
+
 ## [3.1.0] — 2026-05-08
 
 > **Bugfix release on top of v3.0.0.** Resolves the v3.0.0 cutover incident
