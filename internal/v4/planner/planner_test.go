@@ -865,3 +865,27 @@ func TestPlanFor_ManualTier_NoCron_AlreadyMatches(t *testing.T) {
 		t.Fatalf("Action: got %q, want %q", plan.Action, ActionAlreadyMatches)
 	}
 }
+
+// A write-eligible PVC with no tier label gets the daily default — but
+// /audit must SAY so (2026-06-09 review: silent defaults are traps).
+func TestPlanFor_UnspecifiedTier_NotesDefault(t *testing.T) {
+	in := withEnabledManage()
+	in.Spec.Tier = labels.TierUnspecified
+	in.Current = CurrentState{} // no children → would-create
+	in.Owner = OwnerNone
+
+	plan := PlanFor(in)
+	if plan.Action != ActionWouldCreate {
+		t.Fatalf("Action: got %q, want %q", plan.Action, ActionWouldCreate)
+	}
+	want := "no pvc-plumber.io/tier label; defaulting to daily cadence — set the label explicitly"
+	found := false
+	for _, n := range plan.Notes {
+		if n == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Notes missing default-tier note; got %v", plan.Notes)
+	}
+}

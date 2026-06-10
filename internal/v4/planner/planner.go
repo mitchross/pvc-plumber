@@ -298,10 +298,29 @@ func PlanFor(in Inputs) Plan {
 		}
 	}
 
+	var plan Plan
 	if writeEligible {
-		return planWriteEligible(in)
+		plan = planWriteEligible(in)
+	} else {
+		plan = planNotWriteEligible(in)
 	}
-	return planNotWriteEligible(in)
+
+	// Post-verdict disclosures (v4.0.2). Only the write-eligible paths
+	// reach here with a meaningful tier; the early-return verdicts above
+	// (exempt / parse errors / not opted in / namespace gate) intentionally
+	// skip these — an exempt or ungated PVC's tier default is irrelevant.
+	if writeEligible && in.Spec.Tier == labels.TierUnspecified {
+		plan.Notes = append(plan.Notes,
+			"no pvc-plumber.io/tier label; defaulting to daily cadence — set the label explicitly")
+	}
+	plan.Notes = append(plan.Notes, inertAnnotationNotes(in)...)
+	return plan
+}
+
+// inertAnnotationNotes surfaces recognized-but-unenforced annotations.
+// Populated in the v4.0.2 hardening pass (Task 4); empty until then.
+func inertAnnotationNotes(in Inputs) []string {
+	return nil
 }
 
 // planWriteEligible covers rules 6a–6h. The PVC has both
