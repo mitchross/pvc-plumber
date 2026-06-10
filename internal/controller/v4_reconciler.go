@@ -49,11 +49,10 @@ const volsyncBackupPVCLabel = "volsync.backup/pvc"
 // cosmetic rename to V4Reconciler is a follow-up cleanup after the
 // karakeep canary.
 //
-// IMPORTANT: cmd/operator/main.go still routes ONLY audit-mode traffic
-// to this reconciler in Patch 6.7 (see reconcilerKindFor). The
-// permissive route-flip is a separate sub-patch (6.7-wire). Patch 6.7
-// proves the reconciler+executor pair work correctly under test;
-// 6.7-wire makes the production binary actually use them.
+// Since 6.7-wire, cmd/operator/main.go routes BOTH audit and permissive
+// modes to this reconciler (reconcilerKindFor); enforce/strict are
+// rejected at startup by validateMode. The v3 PVCReconciler remains only
+// for the legacy code path.
 //
 // Contract (mode-gated):
 //
@@ -92,12 +91,6 @@ const volsyncBackupPVCLabel = "volsync.backup/pvc"
 //     short-circuited at the top of Reconcile so they never appear in
 //     the report. The PVCReconciler v3 does the same for the same
 //     reason (defense-in-depth against webhook namespaceSelector drift).
-//
-// As of Patch 6.7 the reconciler is registered for audit-mode traffic
-// only (cmd/operator/main.go.reconcilerKindFor returns
-// reconcilerKindV4Audit for audit and reconcilerKindV3 for everything
-// else). Permissive/enforce/strict still hit the v3 chart-era
-// PVCReconciler in production until 6.7-wire lands.
 
 // V4AuditReconciler watches PVCs, writes parity entries to the Store, and
 // (from Patch 6.7 onward) invokes the bounded executor to apply planner
