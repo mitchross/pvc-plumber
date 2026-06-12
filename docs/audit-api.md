@@ -1,7 +1,7 @@
 # The `/audit` endpoint 🔎
 
 > `/audit` is the operator's "tell me the truth about every PVC" endpoint. It is **read-only** and
-> the safest way to understand backup/ownership state without touching anything. In v4 it is the
+> the safest way to understand backup/ownership state without touching anything. It is the
 > primary observability surface (there is no admission path to inspect).
 
 ## Where it is
@@ -40,7 +40,7 @@
   "pvc": "copyparty-data",
   "mode": "permissive",
   "tier": "daily",
-  "label_source": "v4",                    // v4 | legacy | both | none
+  "label_source": "v4",                    // label schema generation: v4 | legacy | both | none
   "backup_identity": "copyparty/copyparty-data",
   "expected": { "rs_name": "...", "rd_name": "...-dst", "repository_secret": "...", ... },
   "owner_classification": "managed-by-pvc-plumber",
@@ -51,7 +51,7 @@
 }
 ```
 
-### Tier semantics (v4.0.2)
+### Tier semantics
 
 | tier | RS trigger | meaning |
 |---|---|---|
@@ -60,17 +60,16 @@
 | *(absent)* | daily cron + `/audit` note | defaulted — set the label explicitly |
 | `disabled` | no RS/RD (operator deletes its own) | explicit opt-out with fuse labels kept |
 
-Since v4.0.2 the entry's `current.rs_schedule` carries the live
+The entry's `current.rs_schedule` carries the live
 `spec.trigger.schedule`, and schedule drift on operator-owned RS (including
 a leftover cron after a flip to `manual`) is detected and repaired.
 
-### Inert-annotation disclosures (v4.0.2)
+### Inert-annotation disclosures
 
 PVCs carrying `pvc-plumber.io/min-backup-age`, `pvc-plumber.io/skip-restore`,
 `pvc-plumber.io/mode`, or `pvc-plumber.io/restore-mode` get a note per key:
-`<key> is recognized but not enforced in v4 permissive mode (v5 design-only)`.
-These keys parse cleanly (no `needs-human-review`) but have no runtime effect
-until v5 ships strict/admission/source-gating.
+`<key> is recognized but not enforced in permissive mode`. These keys parse
+cleanly (no `needs-human-review`) but currently have no runtime effect.
 
 ## `action` — the verdict
 
