@@ -67,7 +67,7 @@ to restore from.
 | **Operator** | a robot in the cluster that maintains things by watching and reconciling |
 | **VolSync** | the tool that actually copies disk data to/from a backup repository |
 | **ReplicationSource (RS)** | VolSync's "back this disk up on this schedule" instruction |
-| **ReplicationDestination (RD)** | VolSync's "here's how to restore this disk" instruction |
+| **ReplicationDestination (RD)** | VolSync's "here's how to restore this disk" instruction — think **D for Disaster recovery** |
 | **Kopia** | the backup engine — encrypts, dedupes, stores snapshots |
 | **`dataSourceRef`** | one line on the PVC that means "fill me from my backup when I'm created" |
 | **`/audit`** | the operator's read-only ledger: one verdict per PVC |

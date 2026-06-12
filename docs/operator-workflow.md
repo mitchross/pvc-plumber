@@ -83,8 +83,8 @@ flowchart LR
     DEL[PVC deleted /<br/>cluster rebuilt] --> GIT[GitOps recreates PVC]
     GIT --> DSR{dataSourceRef?}
     DSR -->|yes| POP[VolSync populator<br/>restores from RD latestImage]
-    POP --> OK([PVC Bound **with data** ✅])
-    DSR -->|no| EMPTY([PVC Bound **EMPTY** ⚠️])
+    POP --> OK(["PVC Bound — with data ✅"])
+    DSR -->|no| EMPTY(["PVC Bound EMPTY ⚠️"])
 
     classDef good fill:#dcfce7,stroke:#16a34a,color:#14532d;
     classDef bad fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
