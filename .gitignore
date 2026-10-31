@@ -34,3 +34,7 @@ Thumbs.db
 
 # Temporary files
 /tmp/
+
+# Agent-managed worktrees (Claude Code, Hermes)
+.claude/worktrees/
+.worktrees/
